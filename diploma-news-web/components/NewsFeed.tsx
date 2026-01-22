@@ -59,9 +59,6 @@ export default function NewsFeed() {
     <main className="mx-auto max-w-6xl px-4 py-10">
       <div className="mb-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h1 className="text-3xl font-bold">Стрічка новин</h1>
-        <p className="mt-2 text-slate-600">
-          Дані беруться з бекенду (Render) через <code>/api/news</code>.
-        </p>
 
         <div className="mt-5 flex flex-col gap-3 md:flex-row md:items-center">
           <input
