@@ -14,10 +14,8 @@ type NewsItem = {
 function cleanHtmlText(input?: string): string {
   if (!input) return "";
 
-  // 1) прибираємо теги
   let s = input.replace(/<[^>]*>/g, " ");
 
-  // 2) декодуємо найчастіші HTML-ентіті (без залежностей)
   s = s
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
@@ -26,7 +24,6 @@ function cleanHtmlText(input?: string): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 
-  // 3) прибираємо зайві пробіли/переноси
   s = s.replace(/\s+/g, " ").trim();
 
   return s;
@@ -37,9 +34,20 @@ export default function NewsCard({ item }: { item: NewsItem }) {
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h3 className="text-xl font-semibold leading-snug text-blue-700">
-        {item.title} href={item.link}
-      </h3>
+      {item.link ? (
+        <a
+          href={item.link}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block text-xl font-semibold leading-snug text-blue-700 hover:underline"
+        >
+          {item.title}
+        </a>
+      ) : (
+        <h3 className="text-xl font-semibold leading-snug text-blue-700">
+          {item.title}
+        </h3>
+      )}
 
       <div className="mt-2 text-sm text-slate-500">
         {item.topic ? <span>{item.topic}</span> : null}
