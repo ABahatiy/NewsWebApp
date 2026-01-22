@@ -1,74 +1,93 @@
 from __future__ import annotations
 
-import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
-# Підтримка запуску як package і як "root dir = DiplomaTgBot"
-try:
-    from .config import OPENAI_API_KEY
-except Exception:
-    from config import OPENAI_API_KEY  # type: ignore
+from config import (
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_TIMEOUT_SEC,
+    LLM_MAX_INPUT_CHARS,
+    USE_LLM,
+    CHAT_HISTORY_LIMIT,
+)
 
+def _trim_text(s: str, limit: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "..."
 
-def _fallback_response(message: str) -> str:
-    # Якщо LLM вимкнено або нема ключа
-    return (
-        "AI-агент тимчасово недоступний. "
-        "Перевір OPENAI_API_KEY / USE_LLM у Render Environment. "
-        f"Твоє повідомлення: {message}"
-    )
+def _normalize_history(history: List[Dict]) -> List[Dict]:
+    cleaned: List[Dict] = []
+    for m in history or []:
+        role = (m.get("role") or "").strip()
+        content = (m.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            cleaned.append({"role": role, "content": content})
+    if len(cleaned) > CHAT_HISTORY_LIMIT:
+        cleaned = cleaned[-CHAT_HISTORY_LIMIT:]
+    return cleaned
 
-
-def chat_with_agent(
-    message: str,
-    context: Optional[List[Dict[str, Any]]] = None,
-) -> str:
+def chat_with_agent(message: str, history: List[Dict] | None = None) -> Dict:
     """
-    Мінімальна функція, яку викликає API.
-    context можна передати як список новин (title/source/url/description) — опційно.
+    Повертає:
+      {
+        "answer": "...",
+        "model": "...",
+        "used_llm": true/false
+      }
     """
-    use_llm = os.getenv("USE_LLM", "1").strip().lower() in ("1", "true", "yes", "on")
-    if not use_llm or not OPENAI_API_KEY:
-        return _fallback_response(message)
+    msg = _trim_text(message, LLM_MAX_INPUT_CHARS)
+    hist = _normalize_history(history or [])
 
-    # Найпростіша інтеграція через OpenAI SDK (якщо він у requirements).
-    # Якщо SDK у тебе інший/відсутній — бек не впаде, а піде у fallback.
+    if not USE_LLM:
+        return {
+            "answer": "LLM вимкнено (USE_LLM=0).",
+            "model": OPENAI_MODEL,
+            "used_llm": False,
+        }
+
+    if not OPENAI_API_KEY:
+        return {
+            "answer": "Не задано OPENAI_API_KEY на сервері.",
+            "model": OPENAI_MODEL,
+            "used_llm": False,
+        }
+
+    # максимально проста інтеграція через openai (новий клієнт)
     try:
-        from openai import OpenAI  # type: ignore
+        from openai import OpenAI
     except Exception:
-        return _fallback_response(message)
+        return {
+            "answer": "Не встановлено бібліотеку openai у requirements.txt.",
+            "model": OPENAI_MODEL,
+            "used_llm": False,
+        }
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    sys = (
-        "Ти AI-помічник новинного агрегатора. "
-        "Відповідай коротко, по суті, українською. "
-        "Якщо є контекст новин — спирайся на нього."
-    )
-
-    ctx_text = ""
-    if context:
-        lines = []
-        for i, it in enumerate(context[:10], start=1):
-            title = (it.get("title") or "").strip()
-            source = (it.get("source") or "").strip()
-            url = (it.get("url") or it.get("link") or "").strip()
-            lines.append(f"{i}. {title} ({source}) {url}".strip())
-        ctx_text = "\n".join(lines)
-
-    user = message.strip()
-    if ctx_text:
-        user = f"Ось контекст новин:\n{ctx_text}\n\nЗапит користувача:\n{message.strip()}"
+    messages = []
+    # системне повідомлення можна мінімальне, щоб не ламати логіку
+    messages.append({
+        "role": "system",
+        "content": "Ти AI-помічник новинного застосунку. Відповідай коротко і по суті українською.",
+    })
+    messages.extend(hist)
+    messages.append({"role": "user", "content": msg})
 
     try:
         resp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.4,
+            model=OPENAI_MODEL,
+            messages=messages,
+            timeout=OPENAI_TIMEOUT_SEC,
         )
-        return (resp.choices[0].message.content or "").strip() or "Нема відповіді."
-    except Exception:
-        return _fallback_response(message)
+        answer = (resp.choices[0].message.content or "").strip()
+        if not answer:
+            answer = "Порожня відповідь від моделі."
+        return {"answer": answer, "model": OPENAI_MODEL, "used_llm": True}
+    except Exception as e:
+        return {
+            "answer": f"Помилка виклику LLM: {type(e).__name__}: {e}",
+            "model": OPENAI_MODEL,
+            "used_llm": False,
+        }

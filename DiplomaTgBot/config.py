@@ -1,9 +1,9 @@
 import os
 import logging
+from urllib.parse import quote
 
 # --- Telegram ---
-# Підтримка двох назв змінних, щоб було зручно на різних хостингах
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 
 # --- DB ---
 DB_PATH = os.getenv("DB_PATH", "bot_data.sqlite3")
@@ -35,10 +35,14 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", 25))
 LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", 3500))
 USE_LLM = os.getenv("USE_LLM", "1") == "1"
-
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", 20))
 
+# --- CORS ---
+# приклад: "https://newswebapp-pied.vercel.app,http://localhost:3000"
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").strip()
+
 # --- Topics (фіксовані, для меню) ---
+# key — те, що зберігаємо в БД
 TOPICS = [
     {"key": "ukraine", "label": "Україна", "query": "Україна"},
     {"key": "world", "label": "Світ", "query": "Світ"},
@@ -71,7 +75,6 @@ def topics_text() -> str:
 
 # --- Sources (Google News RSS) ---
 def _google_news_rss_url(query: str, lang: str = "uk", region: str = "UA") -> str:
-    from urllib.parse import quote
     q = quote(query)
     return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={region}&ceid={region}:{lang}"
 
@@ -85,3 +88,7 @@ NEWS_SOURCES = [
     }
     for t in TOPICS
 ]
+
+# --- Backward-compatible alias ---
+# Старий код/імпорти можуть очікувати RSS_URLS
+RSS_URLS = [s["url"] for s in NEWS_SOURCES]
