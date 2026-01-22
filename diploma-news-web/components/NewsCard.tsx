@@ -7,25 +7,52 @@ function formatDate(iso?: string) {
   return d.toLocaleString("uk-UA", { dateStyle: "medium", timeStyle: "short" });
 }
 
+function stripHtml(s?: string) {
+  if (!s) return "";
+  return s.replace(/<[^>]+>/g, "").trim();
+}
+
 export default function NewsCard({ item }: { item: NewsItem }) {
+  const href = (item.link || "").trim();
+
   return (
-    <article className="card p-4">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="text-xs text-zinc-600">{item.source}</span>
-        <span className="text-xs text-zinc-500">{formatDate(item.publishedAt)}</span>
+    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="mb-3 text-sm text-slate-500">
+        <span>{item.source || ""}</span>
+        {item.publishedAt ? (
+          <>
+            <span className="mx-2">•</span>
+            <span>{formatDate(item.publishedAt)}</span>
+          </>
+        ) : null}
       </div>
 
-      <a href={item.link} target="_blank" rel="noreferrer" className="block">
-        <h3 className="text-base font-semibold leading-snug">{item.title}</h3>
-      </a>
-
-      {item.summary ? <p className="mt-2 text-sm text-zinc-700">{item.summary}</p> : null}
-
-      <div className="mt-3">
-        <a className="text-sm" href={item.link} target="_blank" rel="noreferrer">
-          Перейти до джерела →
-        </a>
+      <div className="text-xl font-semibold leading-snug text-blue-700">
+        {href ? (
+          <a href={href} target="_blank" rel="noreferrer">
+            {item.title}
+          </a>
+        ) : (
+          <span>{item.title}</span>
+        )}
       </div>
-    </article>
+
+      {item.summary ? (
+        <p className="mt-3 text-slate-700">{stripHtml(item.summary)}</p>
+      ) : null}
+
+      {href ? (
+        <div className="mt-4">
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 text-blue-700 hover:underline"
+          >
+            Перейти до джерела →
+          </a>
+        </div>
+      ) : null}
+    </div>
   );
 }

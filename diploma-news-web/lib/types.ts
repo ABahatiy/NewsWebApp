@@ -1,26 +1,11 @@
+export type Topic = { id: string; title: string; keywords?: string[] };
+
 export type NewsItem = {
   id: string;
   title: string;
-  link: string;
+  link: string;        // важливо: бекенд віддає link
   source: string;
-  publishedAt?: string; // ISO
-  summary?: string;
+  summary?: string;    // бекенд віддає summary
+  publishedAt?: string;
   topic?: string;
-};
-
-export type Topic = {
-  id: string;
-  title: string;
-  keywords: string[];
-};
-
-export type NewsApiResponse = {
-  items: NewsItem[];
-  topics: Topic[];
-  meta: {
-    fetchedAt: string; // ISO
-    total: number;
-    query?: string;
-    topic?: string;
-  };
 };
