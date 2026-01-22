@@ -1,118 +1,74 @@
-import os
-from typing import List, Dict, Any, Optional
+from __future__ import annotations
 
-from .config import (
+from typing import Any, Dict, List
+
+from config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
     OPENAI_TIMEOUT_SEC,
     USE_LLM,
     LLM_MAX_INPUT_CHARS,
-    CHAT_HISTORY_LIMIT,
 )
 
-# Працюємо з OpenAI SDK v1.x
-# requirements.txt має містити: openai>=1.0.0
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-
-
-def _trim(text: str, limit: int) -> str:
+def _truncate(text: str, limit: int) -> str:
     text = (text or "").strip()
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 3)] + "..."
+    return text[: limit - 3] + "..."
 
+def _format_news_context(news_items: List[Dict[str, Any]], max_chars: int) -> str:
+    # Формуємо компактний контекст для LLM (без полотна лінків)
+    parts: List[str] = []
+    for i, it in enumerate(news_items or [], start=1):
+        title = (it.get("title") or "").strip()
+        source = (it.get("source") or it.get("publisher") or "").strip()
+        published = (it.get("published") or it.get("date") or "").strip()
+        line = f"{i}. {title}"
+        meta = " · ".join([x for x in [source, published] if x])
+        if meta:
+            line += f" ({meta})"
+        parts.append(line)
 
-class LlmAgent:
-    def __init__(self) -> None:
-        self.enabled = bool(USE_LLM) and bool(OPENAI_API_KEY) and (OpenAI is not None)
-        self.model = OPENAI_MODEL
-        self.timeout = OPENAI_TIMEOUT_SEC
+    ctx = "\n".join(parts).strip()
+    return _truncate(ctx, max_chars)
 
-        self._client = None
-        if self.enabled:
-            self._client = OpenAI(api_key=OPENAI_API_KEY)
+def chat_with_agent(user_message: str, news_items: List[Dict[str, Any]]) -> str:
+    """
+    Повертає відповідь агента. Якщо USE_LLM=0 або немає ключа — дає просту відповідь-заглушку.
+    """
+    user_message = (user_message or "").strip()
+    if not user_message:
+        return ""
 
-        self.system_prompt = (
-            "Ти — корисний, лаконічний і точний асистент новинного вебзастосунку. "
-            "Відповідай українською. Якщо користувач просить поради по новинах — "
-            "пояснюй коротко суть, контекст і можливі наслідки. "
-            "Не вигадуй фактів: якщо даних не вистачає — скажи про це і запропонуй, "
-            "що уточнити."
-        )
+    # Якщо LLM вимкнено або нема ключа — повертаємо "fallback"
+    if (not USE_LLM) or (not OPENAI_API_KEY):
+        return "AI агент зараз вимкнений (USE_LLM=0) або не задано OPENAI_API_KEY."
 
-    def is_ready(self) -> bool:
-        return self.enabled
+    context = _format_news_context(news_items, max_chars=LLM_MAX_INPUT_CHARS)
 
-    def chat(
-        self,
-        message: str,
-        history: Optional[List[Dict[str, str]]] = None,
-        context: str = "",
-    ) -> Dict[str, Any]:
-        """
-        history: список у форматі [{"role":"user"|"assistant", "content":"..."}]
-        context: додатковий контекст (наприклад, підбірка новин)
-        """
-        message = (message or "").strip()
-        if not message:
-            return {"answer": "Напиши повідомлення, і я відповім.", "used_llm": False}
+    system_prompt = (
+        "Ти — новинний помічник. Відповідай українською, лаконічно та по суті. "
+        "Якщо питання стосується новин — спирайся на наданий список новин. "
+        "Якщо даних недостатньо — скажи, чого не вистачає, і запропонуй уточнення."
+    )
 
-        if not self.is_ready():
-            # М’який фолбек, щоб фронт не падав
-            reason = []
-            if not USE_LLM:
-                reason.append("USE_LLM=0")
-            if not OPENAI_API_KEY:
-                reason.append("OPENAI_API_KEY не заданий")
-            if OpenAI is None:
-                reason.append("пакет openai не встановлено")
-            why = ", ".join(reason) if reason else "LLM вимкнено"
-            return {
-                "answer": f"ШІ-агент зараз недоступний ({why}).",
-                "used_llm": False,
-            }
+    user_prompt = (
+        f"Питання користувача:\n{user_message}\n\n"
+        f"Ось актуальні новини (для контексту):\n{context}"
+    )
 
-        safe_history: List[Dict[str, str]] = []
-        if history:
-            # беремо останні N повідомлень
-            history = history[-CHAT_HISTORY_LIMIT:]
-            for item in history:
-                r = (item.get("role") or "").strip()
-                c = (item.get("content") or "").strip()
-                if r in ("user", "assistant") and c:
-                    safe_history.append({"role": r, "content": _trim(c, 1500)})
+    # OpenAI SDK (новий стиль). Якщо у тебе інший SDK/версія — скажеш, піджену.
+    from openai import OpenAI
 
-        ctx = _trim(context, 4000)
-        user_text = message
-        if ctx:
-            user_text = (
-                "Контекст (новини/дані):\n"
-                f"{ctx}\n\n"
-                "Запит користувача:\n"
-                f"{message}"
-            )
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
-        # обмежуємо загальний інпут
-        user_text = _trim(user_text, LLM_MAX_INPUT_CHARS)
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        timeout=OPENAI_TIMEOUT_SEC,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
 
-        messages = [{"role": "system", "content": self.system_prompt}]
-        messages.extend(safe_history)
-        messages.append({"role": "user", "content": user_text})
-
-        resp = self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            timeout=self.timeout,
-        )
-
-        answer = ""
-        try:
-            answer = resp.choices[0].message.content or ""
-        except Exception:
-            answer = ""
-
-        answer = (answer or "").strip() or "Не зміг сформувати відповідь. Спробуй перефразувати."
-        return {"answer": answer, "used_llm": True, "model": self.model}
+    return (resp.choices[0].message.content or "").strip()
