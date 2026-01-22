@@ -38,7 +38,7 @@ export default function NewsCard({ item }: { item: NewsItem }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
       <h3 className="text-xl font-semibold leading-snug text-blue-700">
-        {item.title}
+        {item.title} href={item.link}
       </h3>
 
       <div className="mt-2 text-sm text-slate-500">
