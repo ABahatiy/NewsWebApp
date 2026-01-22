@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { stripHtml } from "../lib/text";
+import AiExplain from "@/components/AiExplain";
 
 type NewsItem = {
   id?: string;
@@ -148,6 +149,8 @@ export default function Page() {
             );
           })}
         </div>
+
+        <AiExplain contextItems={items} />
 
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <div style={{ color: "#666" }}>Знайдено: {filtered.length}</div>

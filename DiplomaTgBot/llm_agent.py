@@ -1,79 +1,114 @@
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Optional
 
-from config import (
-    OPENAI_API_KEY,
-    OPENAI_MODEL,
-    OPENAI_TIMEOUT_SEC,
-    LLM_MAX_INPUT_CHARS,
-    USE_LLM,
+import httpx
+
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "25"))
+USE_LLM = os.getenv("USE_LLM", "1") == "1"
+
+SYSTEM_PROMPT = (
+    "Ти корисний ШІ-асистент для новинного сайту. "
+    "Відповідай українською, коротко і по суті. "
+    "Якщо користувач просить підсумок новини — стисло підсумуй. "
+    "Якщо просить пояснення — поясни простими словами."
 )
 
-# Підтримка нового SDK OpenAI (openai>=1.x)
-# Якщо бібліотеки нема або ключа нема — агент буде працювати як заглушка.
-def _is_llm_ready() -> bool:
-    return bool(USE_LLM and OPENAI_API_KEY)
+
+class LLMError(Exception):
+    pass
 
 
-def _truncate(text: str, limit: int) -> str:
-    text = text or ""
-    if len(text) <= limit:
-        return text
-    return text[:limit]
-
-
-def chat_with_agent(message: str, history: List[Dict[str, str]] | None = None) -> Dict[str, Any]:
+async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     """
-    message: поточне повідомлення користувача
-    history: список повідомлень формату [{"role":"user|assistant","content":"..."}]
+    Використовує OpenAI Responses API через HTTP (без SDK), щоб не ловити проблеми з версіями.
+    Працює у середовищі Render нормально, якщо задано OPENAI_API_KEY.
     """
-    message = (message or "").strip()
-    if not message:
-        return {"ok": False, "error": "Empty message"}
+    if not OPENAI_API_KEY:
+        raise LLMError("OPENAI_API_KEY is missing")
 
-    if not _is_llm_ready():
-        return {
-            "ok": True,
-            "mode": "stub",
-            "reply": "LLM вимкнено або не задано OPENAI_API_KEY на бекенді.",
-        }
+    url = "https://api.openai.com/v1/responses"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    try:
-        from openai import OpenAI  # type: ignore
-    except Exception:
-        return {
-            "ok": True,
-            "mode": "stub",
-            "reply": "На бекенді не встановлено бібліотеку openai. Додай її в requirements.txt.",
-        }
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": messages,
+    }
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    timeout = httpx.Timeout(OPENAI_TIMEOUT_SEC)
 
-    safe_history: List[Dict[str, str]] = []
-    if history:
-        for m in history[-20:]:
-            role = (m.get("role") or "").strip()
-            content = (m.get("content") or "").strip()
-            if role in ("user", "assistant") and content:
-                safe_history.append({"role": role, "content": _truncate(content, 1200)})
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise LLMError(f"OpenAI error {r.status_code}: {r.text}")
 
-    user_text = _truncate(message, LLM_MAX_INPUT_CHARS)
+        data = r.json()
 
-    system = (
-        "Ти ШІ-асистент новинного застосунку. Відповідай стисло, по суті. "
-        "Якщо користувач просить підсумувати новини — попроси вставити текст/посилання або "
-        "запропонуй короткий формат підсумку."
-    )
+    # Витягуємо текст відповіді з output
+    # Структура Responses API може бути різною; нижче максимально “живучий” парсер.
+    out = data.get("output", [])
+    parts: List[str] = []
 
-    messages = [{"role": "system", "content": system}] + safe_history + [{"role": "user", "content": user_text}]
+    for item in out:
+        content = item.get("content", [])
+        for c in content:
+            if c.get("type") == "output_text" and "text" in c:
+                parts.append(c["text"])
 
-    try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            timeout=OPENAI_TIMEOUT_SEC,
-        )
-        reply = resp.choices[0].message.content or ""
-        return {"ok": True, "mode": "openai", "reply": reply.strip()}
-    except Exception as e:
-        return {"ok": False, "error": f"OpenAI request failed: {type(e).__name__}: {e}"}
+    text = "\n".join(parts).strip()
+    if not text:
+        # fallback
+        text = (data.get("output_text") or "").strip()
+
+    if not text:
+        raise LLMError("Empty response from OpenAI")
+
+    return text
+
+
+async def chat_with_agent(
+    user_message: str,
+    context_items: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """
+    context_items: список об'єктів новин (title/url/source/description), які можна підмішати в контекст.
+    """
+    user_message = (user_message or "").strip()
+    if not user_message:
+        return "Напиши повідомлення, і я відповім."
+
+    if not USE_LLM:
+        return "LLM вимкнено (USE_LLM=0)."
+
+    ctx_text = ""
+    if context_items:
+        lines = []
+        for i, it in enumerate(context_items[:10], start=1):
+            title = (it.get("title") or "").strip()
+            source = (it.get("source") or it.get("publisher") or "").strip()
+            url = (it.get("url") or it.get("link") or "").strip()
+            desc = (it.get("description") or it.get("summary") or "").strip()
+            lines.append(
+                f"{i}) {title}\n"
+                f"Джерело: {source}\n"
+                f"Посилання: {url}\n"
+                f"Опис: {desc}\n"
+            )
+        if lines:
+            ctx_text = "Ось добірка новин (контекст):\n\n" + "\n".join(lines)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+
+    if ctx_text:
+        messages.append({"role": "user", "content": ctx_text})
+
+    messages.append({"role": "user", "content": user_message})
+
+    return await _openai_chat(messages)

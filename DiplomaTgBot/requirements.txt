@@ -8,6 +8,7 @@ fastapi==0.128.0
 feedparser==6.0.12
 h11==0.16.0
 httptools==0.7.1
+httpx==0.27.2
 idna==3.11
 openai>=1.0.0
 pydantic==2.12.5

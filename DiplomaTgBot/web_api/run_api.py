@@ -1,56 +1,70 @@
 import os
-import time
-import logging
-from typing import Optional, Dict, Any, List
+import re
+from typing import Any, Dict, List, Optional
 
-import requests
 import feedparser
-from fastapi import FastAPI, HTTPException, Query
+import httpx
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from config import (
-    setup_logging,
-    REQUEST_TIMEOUT,
-    MAX_ITEMS_TOTAL,
-    TOPICS,
-    get_topic_by_key,
-    NEWS_SOURCES,
-)
 
+# ВАЖЛИВО: імпорт без відносних шляхів, щоб працювало на Render з uvicorn web_api.run_api:app
+import config
 from llm_agent import chat_with_agent
 
-
-setup_logging()
-logger = logging.getLogger("web_api")
 
 app = FastAPI(title="Diploma News API", version="1.0.0")
 
 
-# --- CORS ---
-# На Render в Environment задай:
-# CORS_ORIGINS=https://newswebapp-pied.vercel.app,https://<твій-другий-домен>.vercel.app
-cors_origins_raw = os.getenv("CORS_ORIGINS", "").strip()
-cors_origins = [x.strip() for x in cors_origins_raw.split(",") if x.strip()]
+def _parse_origins(value: str) -> List[str]:
+    value = (value or "").strip()
+    if not value:
+        return []
+    # дозволяємо "a,b,c" або "a; b; c"
+    parts = re.split(r"[;,]\s*", value)
+    return [p.strip() for p in parts if p.strip()]
 
-if cors_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+
+CORS_ORIGINS = _parse_origins(os.getenv("CORS_ORIGINS", ""))
+
+# Якщо не задав — дозволимо все (так простіше на старті). Потім краще обмежити.
+if CORS_ORIGINS:
+    allow_origins = CORS_ORIGINS
+    allow_credentials = True
 else:
-    # Якщо не задано — лишаємо без CORS (щоб випадково не відкрити всім)
-    logger.info("CORS_ORIGINS is empty; CORS middleware is not enabled")
+    allow_origins = ["*"]
+    allow_credentials = False
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/")
-def root() -> Dict[str, Any]:
-    return {
-        "status": "ok",
-        "hint": "Use /health, /topics, /news, /chat. Docs: /docs",
-    }
+class NewsItem(BaseModel):
+    title: str
+    url: str
+    source: str = ""
+    description: str = ""
+
+
+class NewsResponse(BaseModel):
+    items: List[NewsItem]
+    updated_at: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str
+    # опціонально фронт може передати поточні новини як контекст
+    context_items: Optional[List[Dict[str, Any]]] = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
 
 
 @app.get("/health")
@@ -60,112 +74,100 @@ def health() -> Dict[str, str]:
 
 @app.get("/topics")
 def topics() -> Dict[str, Any]:
-    return {"topics": TOPICS}
+    # topics береться з config.TOPICS
+    return {"topics": config.TOPICS}
 
 
-def _fetch_google_news_rss(url: str, timeout: float) -> List[Dict[str, Any]]:
-    """
-    Повертає список item'ів із RSS.
-    """
-    # Google News RSS інколи блокує без User-Agent
-    headers = {"User-Agent": "Mozilla/5.0 (NewsWebApp; +https://example.com)"}
-    r = requests.get(url, timeout=timeout, headers=headers)
-    r.raise_for_status()
-    parsed = feedparser.parse(r.text)
+def _google_news_rss_url(query: str, lang: str = "uk", region: str = "UA") -> str:
+    from urllib.parse import quote
 
-    items: List[Dict[str, Any]] = []
-    for e in parsed.entries or []:
-        title = (getattr(e, "title", "") or "").strip()
-        link = (getattr(e, "link", "") or "").strip()
-        published = (getattr(e, "published", "") or "").strip()
-        summary = (getattr(e, "summary", "") or "").strip()
-
-        if not title or not link:
-            continue
-
-        items.append(
-            {
-                "title": title,
-                "url": link,
-                "published": published,
-                "summary": summary,
-            }
-        )
-    return items
+    q = quote(query)
+    return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={region}&ceid={region}:{lang}"
 
 
-@app.get("/news")
-def news(
-    topic: str = Query("all", description="topic key from /topics або 'all'"),
-    limit: int = Query(10, ge=1, le=60),
-) -> Dict[str, Any]:
-    """
-    topic=all або topic=<key>
-    """
-    started = time.time()
+def _clean_html(text: str) -> str:
+    if not text:
+        return ""
+    # грубо прибираємо теги, щоб не “їхала” верстка на фронті
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-    try:
-        topic = (topic or "").strip().lower()
-        if topic != "all":
-            t = get_topic_by_key(topic)
-            if not t:
-                raise HTTPException(status_code=400, detail=f"Unknown topic key: {topic}")
 
-        # Джерела з config.py (NEWS_SOURCES згенерований з TOPICS)
-        sources = NEWS_SOURCES
-        if topic != "all":
-            sources = [s for s in NEWS_SOURCES if s.get("key") == topic]
+@app.get("/news", response_model=NewsResponse)
+async def news(
+    topic: str = Query(default="all"),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> NewsResponse:
+    topic = (topic or "all").strip().lower()
 
-        if not sources:
-            return {"items": [], "count": 0}
+    # topic=all -> беремо кілька тем, але обмежуємо загальний ліміт
+    if topic == "all":
+        selected = config.TOPICS[:]
+    else:
+        found = config.get_topic_by_key(topic)
+        selected = [found] if found else []
 
-        all_items: List[Dict[str, Any]] = []
-        for src in sources:
-            url = src.get("url")
-            if not url:
+    if not selected:
+        return NewsResponse(items=[], updated_at="")
+
+    # збираємо RSS URL-и
+    urls = []
+    for t in selected:
+        urls.append(_google_news_rss_url(t["query"]))
+
+    timeout = httpx.Timeout(config.REQUEST_TIMEOUT)
+
+    items: List[NewsItem] = []
+    updated_at = ""
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for rss_url in urls:
+            try:
+                r = await client.get(rss_url)
+                r.raise_for_status()
+                feed = feedparser.parse(r.text)
+
+                if not updated_at:
+                    updated_at = getattr(feed.feed, "updated", "") or ""
+
+                for e in feed.entries:
+                    title = _clean_html(getattr(e, "title", "") or "")
+                    link = getattr(e, "link", "") or ""
+                    summary = _clean_html(getattr(e, "summary", "") or "")
+
+                    source = ""
+                    # інколи Google News дає source в e.source.title
+                    try:
+                        source = getattr(getattr(e, "source", None), "title", "") or ""
+                    except Exception:
+                        source = ""
+
+                    if title and link:
+                        items.append(
+                            NewsItem(
+                                title=title,
+                                url=link,
+                                source=source,
+                                description=summary,
+                            )
+                        )
+
+                    if len(items) >= limit:
+                        break
+
+                if len(items) >= limit:
+                    break
+
+            except Exception:
+                # не валимо весь /news, якщо одна тема впала
                 continue
 
-            try:
-                items = _fetch_google_news_rss(url, timeout=float(REQUEST_TIMEOUT))
-                for it in items:
-                    it["topic"] = src.get("topic")
-                    it["key"] = src.get("key")
-                all_items.extend(items)
-            except Exception as e:
-                # Не валимо весь запит через одну тему, але лог пишемо
-                logger.exception("Failed fetching RSS for %s: %s", url, e)
-
-            if len(all_items) >= MAX_ITEMS_TOTAL:
-                break
-
-        # просте обрізання
-        all_items = all_items[:limit]
-
-        return {
-            "items": all_items,
-            "count": len(all_items),
-            "took_ms": int((time.time() - started) * 1000),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("NEWS endpoint crashed: %s", e)
-        raise HTTPException(status_code=500, detail="News fetch failed. Check server logs.")
+    return NewsResponse(items=items[:limit], updated_at=updated_at)
 
 
-@app.post("/chat")
-def chat(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Очікує:
-    {
-      "message": "привіт",
-      "history": [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
-    }
-    """
-    message = (payload.get("message") or "").strip()
-    history = payload.get("history") or None
-    result = chat_with_agent(message=message, history=history)
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "LLM failed"))
-    return result
+@app.post("/chat", response_model=ChatResponse)
+async def chat(payload: ChatRequest) -> ChatResponse:
+    answer = await chat_with_agent(payload.message, payload.context_items)
+    return ChatResponse(answer=answer)
