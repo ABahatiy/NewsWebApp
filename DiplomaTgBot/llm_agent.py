@@ -1,74 +1,79 @@
-from __future__ import annotations
-
-from typing import Any, Dict, List
+import os
+from typing import List, Dict, Any
 
 from config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
     OPENAI_TIMEOUT_SEC,
-    USE_LLM,
     LLM_MAX_INPUT_CHARS,
+    USE_LLM,
 )
 
+# Підтримка нового SDK OpenAI (openai>=1.x)
+# Якщо бібліотеки нема або ключа нема — агент буде працювати як заглушка.
+def _is_llm_ready() -> bool:
+    return bool(USE_LLM and OPENAI_API_KEY)
+
+
 def _truncate(text: str, limit: int) -> str:
-    text = (text or "").strip()
+    text = text or ""
     if len(text) <= limit:
         return text
-    return text[: limit - 3] + "..."
+    return text[:limit]
 
-def _format_news_context(news_items: List[Dict[str, Any]], max_chars: int) -> str:
-    # Формуємо компактний контекст для LLM (без полотна лінків)
-    parts: List[str] = []
-    for i, it in enumerate(news_items or [], start=1):
-        title = (it.get("title") or "").strip()
-        source = (it.get("source") or it.get("publisher") or "").strip()
-        published = (it.get("published") or it.get("date") or "").strip()
-        line = f"{i}. {title}"
-        meta = " · ".join([x for x in [source, published] if x])
-        if meta:
-            line += f" ({meta})"
-        parts.append(line)
 
-    ctx = "\n".join(parts).strip()
-    return _truncate(ctx, max_chars)
-
-def chat_with_agent(user_message: str, news_items: List[Dict[str, Any]]) -> str:
+def chat_with_agent(message: str, history: List[Dict[str, str]] | None = None) -> Dict[str, Any]:
     """
-    Повертає відповідь агента. Якщо USE_LLM=0 або немає ключа — дає просту відповідь-заглушку.
+    message: поточне повідомлення користувача
+    history: список повідомлень формату [{"role":"user|assistant","content":"..."}]
     """
-    user_message = (user_message or "").strip()
-    if not user_message:
-        return ""
+    message = (message or "").strip()
+    if not message:
+        return {"ok": False, "error": "Empty message"}
 
-    # Якщо LLM вимкнено або нема ключа — повертаємо "fallback"
-    if (not USE_LLM) or (not OPENAI_API_KEY):
-        return "AI агент зараз вимкнений (USE_LLM=0) або не задано OPENAI_API_KEY."
+    if not _is_llm_ready():
+        return {
+            "ok": True,
+            "mode": "stub",
+            "reply": "LLM вимкнено або не задано OPENAI_API_KEY на бекенді.",
+        }
 
-    context = _format_news_context(news_items, max_chars=LLM_MAX_INPUT_CHARS)
-
-    system_prompt = (
-        "Ти — новинний помічник. Відповідай українською, лаконічно та по суті. "
-        "Якщо питання стосується новин — спирайся на наданий список новин. "
-        "Якщо даних недостатньо — скажи, чого не вистачає, і запропонуй уточнення."
-    )
-
-    user_prompt = (
-        f"Питання користувача:\n{user_message}\n\n"
-        f"Ось актуальні новини (для контексту):\n{context}"
-    )
-
-    # OpenAI SDK (новий стиль). Якщо у тебе інший SDK/версія — скажеш, піджену.
-    from openai import OpenAI
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception:
+        return {
+            "ok": True,
+            "mode": "stub",
+            "reply": "На бекенді не встановлено бібліотеку openai. Додай її в requirements.txt.",
+        }
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        timeout=OPENAI_TIMEOUT_SEC,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+    safe_history: List[Dict[str, str]] = []
+    if history:
+        for m in history[-20:]:
+            role = (m.get("role") or "").strip()
+            content = (m.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                safe_history.append({"role": role, "content": _truncate(content, 1200)})
+
+    user_text = _truncate(message, LLM_MAX_INPUT_CHARS)
+
+    system = (
+        "Ти ШІ-асистент новинного застосунку. Відповідай стисло, по суті. "
+        "Якщо користувач просить підсумувати новини — попроси вставити текст/посилання або "
+        "запропонуй короткий формат підсумку."
     )
 
-    return (resp.choices[0].message.content or "").strip()
+    messages = [{"role": "system", "content": system}] + safe_history + [{"role": "user", "content": user_text}]
+
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            timeout=OPENAI_TIMEOUT_SEC,
+        )
+        reply = resp.choices[0].message.content or ""
+        return {"ok": True, "mode": "openai", "reply": reply.strip()}
+    except Exception as e:
+        return {"ok": False, "error": f"OpenAI request failed: {type(e).__name__}: {e}"}
