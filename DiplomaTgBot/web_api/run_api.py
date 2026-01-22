@@ -13,15 +13,38 @@ from pydantic import BaseModel
 
 # Підтримка запуску як package і як "root dir = DiplomaTgBot"
 try:
-    from ..config import TOPICS, RSS_URLS
+    from ..config import TOPICS
 except Exception:
-    from config import TOPICS, RSS_URLS  # type: ignore
+    from config import TOPICS  # type: ignore
 
-try:
-    from llm_agent import chat_with_agent
-except Exception:
-    # якщо імпорт не вдався — не валимо сервіс, просто вимкнемо чат
-    chat_with_agent = None  # type: ignore
+
+def _build_rss_map_from_topics(topics):
+    """
+    Підтримує обидва формати:
+    1) TOPICS = [{"id":"ukraine","title":"Україна","rss":"https://..."}, ...]
+    2) TOPICS = [{"id":"ukraine","title":"Україна","urls":["https://..."]}, ...]
+    3) TOPICS = [{"id":"ukraine","title":"Україна"}, ...] + тоді rss не буде і тема пропаде з API
+    """
+    rss = {}
+    for t in topics or []:
+        tid = t.get("id")
+        if not tid:
+            continue
+
+        if "rss" in t and t["rss"]:
+            rss[tid] = t["rss"]
+            continue
+
+        urls = t.get("urls") or t.get("rss_urls") or []
+        if isinstance(urls, list) and urls:
+            rss[tid] = urls[0]
+            continue
+
+    return rss
+
+
+RSS_URLS = _build_rss_map_from_topics(TOPICS)
+
 
 
 app = FastAPI(title="Diploma News API", version="1.0.0")
