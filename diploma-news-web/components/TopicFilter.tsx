@@ -21,7 +21,11 @@ export default function TopicFilter({
             type="button"
             onClick={() => onChange(t.id)}
             className={`badge ${isActive ? "badge-active" : ""}`}
-            title={t.keywords.length ? `Ключові: ${t.keywords.join(", ")}` : "Без фільтра"}
+            title={
+              (t.keywords?.length ?? 0)
+                ? `Ключові: ${t.keywords!.join(", ")}`
+                : "Без фільтра"
+            }
           >
             {t.title}
           </button>
