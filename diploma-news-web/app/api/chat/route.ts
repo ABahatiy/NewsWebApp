@@ -2,13 +2,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-
-  const topic = searchParams.get("topic") ?? "all";
-  const limit = searchParams.get("limit") ?? "10";
-
-  // ВАЖЛИВО: на Vercel краще читати server-only змінну (без NEXT_PUBLIC)
+export async function POST(req: Request) {
   const baseUrl =
     process.env.PY_API_BASE_URL ||
     process.env.NEXT_PUBLIC_PY_API_BASE_URL ||
@@ -21,11 +15,13 @@ export async function GET(req: Request) {
     );
   }
 
-  const url = `${baseUrl.replace(/\/$/, "")}/news?topic=${encodeURIComponent(
-    topic
-  )}&limit=${encodeURIComponent(limit)}`;
+  const body = await req.json().catch(() => ({}));
 
-  const r = await fetch(url, { cache: "no-store" });
+  const r = await fetch(`${baseUrl.replace(/\/$/, "")}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 
   const text = await r.text();
   try {
