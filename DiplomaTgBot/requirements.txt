@@ -9,6 +9,7 @@ feedparser==6.0.12
 h11==0.16.0
 httptools==0.7.1
 idna==3.11
+openai>=1.0.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dotenv==1.2.1

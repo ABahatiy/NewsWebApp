@@ -1,86 +1,118 @@
 import os
-import json
-import requests
-from typing import Any, Dict, List, Optional
+from typing import List, Dict, Any, Optional
+
+from .config import (
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_TIMEOUT_SEC,
+    USE_LLM,
+    LLM_MAX_INPUT_CHARS,
+    CHAT_HISTORY_LIMIT,
+)
+
+# Працюємо з OpenAI SDK v1.x
+# requirements.txt має містити: openai>=1.0.0
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+
+def _trim(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 class LlmAgent:
-    """
-    Мінімальний агент через OpenAI REST API без залежності від openai SDK.
-    Працює на Render: потрібен OPENAI_API_KEY в Environment.
-    """
+    def __init__(self) -> None:
+        self.enabled = bool(USE_LLM) and bool(OPENAI_API_KEY) and (OpenAI is not None)
+        self.model = OPENAI_MODEL
+        self.timeout = OPENAI_TIMEOUT_SEC
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        timeout_sec: Optional[float] = None,
-        max_input_chars: Optional[int] = None,
-    ) -> None:
-        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
-        self.model = model if model is not None else os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        self.timeout_sec = float(timeout_sec if timeout_sec is not None else os.getenv("OPENAI_TIMEOUT_SEC", "25"))
-        self.max_input_chars = int(max_input_chars if max_input_chars is not None else os.getenv("LLM_MAX_INPUT_CHARS", "3500"))
+        self._client = None
+        if self.enabled:
+            self._client = OpenAI(api_key=OPENAI_API_KEY)
 
-    def _trim(self, text: str) -> str:
-        text = text or ""
-        if len(text) <= self.max_input_chars:
-            return text
-        # обрізаємо, але зберігаємо кінець (часто там питання)
-        return text[-self.max_input_chars :]
-
-    def _build_messages(
-        self,
-        user_message: str,
-        history: Optional[List[Dict[str, str]]] = None,
-        extra_context: Optional[str] = None,
-    ) -> List[Dict[str, str]]:
-        system = (
-            "Ти корисний асистент новинного застосунку. "
-            "Відповідай стисло та по суті. "
-            "Якщо бракує даних — став уточнювальне питання. "
-            "Не вигадуй факти."
+        self.system_prompt = (
+            "Ти — корисний, лаконічний і точний асистент новинного вебзастосунку. "
+            "Відповідай українською. Якщо користувач просить поради по новинах — "
+            "пояснюй коротко суть, контекст і можливі наслідки. "
+            "Не вигадуй фактів: якщо даних не вистачає — скажи про це і запропонуй, "
+            "що уточнити."
         )
-        if extra_context:
-            system += f"\n\nКонтекст:\n{extra_context}"
 
-        msgs: List[Dict[str, str]] = [{"role": "system", "content": system}]
+    def is_ready(self) -> bool:
+        return self.enabled
 
-        if history:
-            # history очікуємо як список: [{"role":"user"/"assistant","content":"..."}]
-            for m in history[-20:]:
-                r = (m.get("role") or "").strip()
-                c = (m.get("content") or "").strip()
-                if r in ("user", "assistant") and c:
-                    msgs.append({"role": r, "content": self._trim(c)})
-
-        msgs.append({"role": "user", "content": self._trim(user_message)})
-        return msgs
-
-    def ask(
+    def chat(
         self,
-        user_message: str,
+        message: str,
         history: Optional[List[Dict[str, str]]] = None,
-        extra_context: Optional[str] = None,
-    ) -> str:
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
+        context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        history: список у форматі [{"role":"user"|"assistant", "content":"..."}]
+        context: додатковий контекст (наприклад, підбірка новин)
+        """
+        message = (message or "").strip()
+        if not message:
+            return {"answer": "Напиши повідомлення, і я відповім.", "used_llm": False}
 
-        url = "https://api.openai.com/v1/chat/completions"
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": self._build_messages(user_message, history=history, extra_context=extra_context),
-            "temperature": 0.4,
-        }
+        if not self.is_ready():
+            # М’який фолбек, щоб фронт не падав
+            reason = []
+            if not USE_LLM:
+                reason.append("USE_LLM=0")
+            if not OPENAI_API_KEY:
+                reason.append("OPENAI_API_KEY не заданий")
+            if OpenAI is None:
+                reason.append("пакет openai не встановлено")
+            why = ", ".join(reason) if reason else "LLM вимкнено"
+            return {
+                "answer": f"ШІ-агент зараз недоступний ({why}).",
+                "used_llm": False,
+            }
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        safe_history: List[Dict[str, str]] = []
+        if history:
+            # беремо останні N повідомлень
+            history = history[-CHAT_HISTORY_LIMIT:]
+            for item in history:
+                r = (item.get("role") or "").strip()
+                c = (item.get("content") or "").strip()
+                if r in ("user", "assistant") and c:
+                    safe_history.append({"role": r, "content": _trim(c, 1500)})
 
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.timeout_sec)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text}")
+        ctx = _trim(context, 4000)
+        user_text = message
+        if ctx:
+            user_text = (
+                "Контекст (новини/дані):\n"
+                f"{ctx}\n\n"
+                "Запит користувача:\n"
+                f"{message}"
+            )
 
-        data = resp.json()
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        # обмежуємо загальний інпут
+        user_text = _trim(user_text, LLM_MAX_INPUT_CHARS)
+
+        messages = [{"role": "system", "content": self.system_prompt}]
+        messages.extend(safe_history)
+        messages.append({"role": "user", "content": user_text})
+
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            timeout=self.timeout,
+        )
+
+        answer = ""
+        try:
+            answer = resp.choices[0].message.content or ""
+        except Exception:
+            answer = ""
+
+        answer = (answer or "").strip() or "Не зміг сформувати відповідь. Спробуй перефразувати."
+        return {"answer": answer, "used_llm": True, "model": self.model}
