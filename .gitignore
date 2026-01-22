@@ -1,0 +1,25 @@
+# ---------- common ----------
+.env
+.env.*
+DiplomaTgBot/.env
+*.log
+.DS_Store
+
+# ---------- Python ----------
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---------- Node / Next ----------
+.next/
+out/
+diploma-news-web/node_modules/
+diploma-news-web/.next/
+node_modules/
+.next/
+
+
+# ---------- IDE ----------
+.idea/
+.vscode/
