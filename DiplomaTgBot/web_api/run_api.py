@@ -1,81 +1,53 @@
-from __future__ import annotations
-
+import os
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
-import xml.etree.ElementTree as ET
 
-import requests
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-import config
-
-
-def _google_news_rss_url(query: str, lang: str = "uk", region: str = "UA") -> str:
-    q = quote(query)
-    return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={region}&ceid={region}:{lang}"
-
-
-def _parse_rss(xml_bytes: bytes) -> List[Dict[str, Any]]:
-    root = ET.fromstring(xml_bytes)
-    channel = root.find("channel")
-    if channel is None:
-        return []
-
-    items: List[Dict[str, Any]] = []
-    for item in channel.findall("item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        pub_date = (item.findtext("pubDate") or "").strip()
-        source_el = item.find("source")
-        source_name = (source_el.text.strip() if source_el is not None and source_el.text else "")
-
-        if not title or not link:
-            continue
-
-        items.append(
-            {
-                "title": title,
-                "link": link,
-                "published": pub_date,
-                "source": source_name,
-            }
-        )
-    return items
-
-
-def _fetch_rss(url: str) -> List[Dict[str, Any]]:
-    r = requests.get(url, timeout=config.REQUEST_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    return _parse_rss(r.content)
+from config import TOPICS, NEWS_SOURCES, USE_LLM
+from news_fetcher import fetch_news  # має повертати список новин (як у вас уже працює для фронта)
+from llm_agent import LlmAgent
 
 
 app = FastAPI(title="Diploma News API", version="1.0.0")
 
 
-# CORS: щоб Vercel-фронт міг ходити напряму на Render
+def _parse_origins(value: str) -> List[str]:
+    items = [x.strip() for x in (value or "").split(",")]
+    return [x for x in items if x]
+
+
+# CORS: на Render вкажеш CORS_ORIGINS="https://newswebapp-pied.vercel.app,https://your-domain.vercel.app"
+cors_origins = _parse_origins(os.getenv("CORS_ORIGINS", ""))
+if not cors_origins:
+    # якщо не задано — дозволяємо все (для дебагу). Для продакшену краще задати CORS_ORIGINS.
+    cors_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "https://newswebapp-pied.vercel.app",
-        "https://newsweb-8t2qc95hc-andriibahatiys-projects.vercel.app",
-        # якщо будуть ще домени Vercel — можна тимчасово поставити "*" (але краще списком)
-    ],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
-def root() -> Dict[str, Any]:
-    return {
-        "name": "Diploma News API",
-        "status": "ok",
-        "endpoints": ["/health", "/topics", "/news?topic=all&limit=10"],
-    }
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: Optional[List[ChatMessage]] = None
+    # опціонально: можна передати короткий контекст (наприклад, список 3–5 новин)
+    context: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    model: str
 
 
 @app.get("/health")
@@ -84,44 +56,42 @@ def health() -> Dict[str, str]:
 
 
 @app.get("/topics")
-def topics() -> List[Dict[str, str]]:
-    # Повертаємо теми для фронта
-    return [{"key": t["key"], "label": t["label"]} for t in config.TOPICS]
+def topics() -> Dict[str, Any]:
+    return {"topics": TOPICS}
 
 
 @app.get("/news")
 def news(
-    topic: str = Query("all"),
+    topic: str = Query("all", description="topic key або all"),
     limit: int = Query(10, ge=1, le=50),
 ) -> Dict[str, Any]:
-    topic_norm = (topic or "all").strip().lower()
+    """
+    Повертає новини з Google News RSS.
+    topic:
+      - all
+      - або конкретний key з TOPICS/NEWS_SOURCES (ukraine, world, ...)
+    """
+    items = fetch_news(topic=topic, limit=limit, sources=NEWS_SOURCES)
+    return {"items": items, "topic": topic, "limit": limit}
 
-    # Формуємо джерела з config.TOPICS (щоб не залежати від старих sources.py)
-    sources = []
-    if topic_norm == "all":
-        sources = [{"key": t["key"], "label": t["label"], "query": t["query"]} for t in config.TOPICS]
-    else:
-        t = config.get_topic_by_key(topic_norm)
-        if t:
-            sources = [{"key": t["key"], "label": t["label"], "query": t["query"]}]
-        else:
-            return {"topic": topic_norm, "items": [], "error": "unknown_topic"}
 
-    all_items: List[Dict[str, Any]] = []
-    for s in sources:
-        url = _google_news_rss_url(s["query"])
-        try:
-            items = _fetch_rss(url)
-            for it in items:
-                it["topic"] = s["key"]
-                it["topicLabel"] = s["label"]
-            all_items.extend(items)
-        except Exception:
-            # не валимо весь запит, якщо одне джерело впало
-            continue
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest) -> ChatResponse:
+    """
+    ШІ-чат. Ключ OpenAI зберігається на Render (OPENAI_API_KEY).
+    """
+    if not USE_LLM:
+        return ChatResponse(reply="LLM вимкнено на сервері (USE_LLM=0).", model=os.getenv("OPENAI_MODEL", ""))
 
-        if len(all_items) >= config.MAX_ITEMS_TOTAL:
-            break
+    agent = LlmAgent()
 
-    # просте обрізання по limit
-    return {"topic": topic_norm, "items": all_items[:limit]}
+    history = None
+    if req.history:
+        history = [{"role": m.role, "content": m.content} for m in req.history]
+
+    reply = agent.ask(
+        user_message=req.message,
+        history=history,
+        extra_context=req.context,
+    )
+    return ChatResponse(reply=reply, model=agent.model)

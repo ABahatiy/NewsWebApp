@@ -1,183 +1,86 @@
-# llm_agent.py
-
-import logging
+import os
 import json
-from typing import Dict, List, Tuple
-
-from openai import OpenAI
-
-from config import (
-    OPENAI_API_KEY,
-    OPENAI_MODEL,
-    OPENAI_TIMEOUT_SEC,
-    LLM_MAX_INPUT_CHARS,
-    DIGEST_MAX_CHARS,
-)
-
-logger = logging.getLogger(__name__)
+import requests
+from typing import Any, Dict, List, Optional
 
 
-def _ensure_key() -> None:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY не заданий.")
-
-
-def _truncate(text: str, limit: int) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
-
-
-def select_relevant_items_with_llm(items: List[Dict], keywords: List[str], max_keep: int = 6) -> List[Dict]:
-    if not keywords:
-        return items[:max_keep]
-
-    _ensure_key()
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    kw = ", ".join(keywords)
-
-    lines: List[str] = []
-    for i, it in enumerate(items, start=1):
-        title = _truncate(it.get("title", ""), 160)
-        summary = _truncate(it.get("summary", ""), 220)
-        link = it.get("link", "")
-        lines.append(f"{i}. {title}\nОпис: {summary}\nURL: {link}")
-
-    raw = "\n\n".join(lines)
-    raw = _truncate(raw, LLM_MAX_INPUT_CHARS)
-
-    prompt = f"""
-Ключові слова: {kw}
-
-Обери лише ті пункти, які дійсно відповідають ключовим словам.
-Відкинь хибні збіги (наприклад, коли ключове слово є частиною іншого слова).
-
-Поверни відповідь СТРОГО у форматі JSON-масиву номерів, наприклад: [2,5,6]
-Максимум {max_keep} пунктів.
-
-Список новин:
-{raw}
-""".strip()
-
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Відповідай строго у потрібному форматі."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
-        timeout=OPENAI_TIMEOUT_SEC,
-    )
-
-    content = (resp.choices[0].message.content or "").strip()
-
-    try:
-        idxs = json.loads(content)
-        if not isinstance(idxs, list):
-            raise ValueError("Not a list")
-        idxs = [int(x) for x in idxs if str(x).isdigit()]
-    except Exception as exc:
-        logger.warning("Не вдалося розпарсити JSON від LLM (%s). Відповідь: %s", exc, content)
-        return items[:max_keep]
-
-    chosen: List[Dict] = []
-    for i in idxs:
-        if 1 <= i <= len(items):
-            chosen.append(items[i - 1])
-        if len(chosen) >= max_keep:
-            break
-
-    return chosen or items[:max_keep]
-
-
-def build_digest_with_llm(items: List[Dict], keywords: List[str]) -> str:
+class LlmAgent:
     """
-    ВАЖЛИВО: повертаємо HTML (короткі лінки через <a href="">Детальніше</a>)
+    Мінімальний агент через OpenAI REST API без залежності від openai SDK.
+    Працює на Render: потрібен OPENAI_API_KEY в Environment.
     """
-    _ensure_key()
-    client = OpenAI(api_key=OPENAI_API_KEY)
 
-    kw = ", ".join(keywords) if keywords else "без фільтра"
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
+        max_input_chars: Optional[int] = None,
+    ) -> None:
+        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
+        self.model = model if model is not None else os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.timeout_sec = float(timeout_sec if timeout_sec is not None else os.getenv("OPENAI_TIMEOUT_SEC", "25"))
+        self.max_input_chars = int(max_input_chars if max_input_chars is not None else os.getenv("LLM_MAX_INPUT_CHARS", "3500"))
 
-    lines: List[str] = []
-    for i, it in enumerate(items, start=1):
-        title = _truncate(it.get("title", ""), 160)
-        summary = _truncate(it.get("summary", ""), 240)
-        link = it.get("link", "")
-        topic = it.get("topic", "")
-        lines.append(
-            f"{i}) Тема: {topic}\nЗаголовок: {title}\nОпис: {summary}\nURL: {link}"
+    def _trim(self, text: str) -> str:
+        text = text or ""
+        if len(text) <= self.max_input_chars:
+            return text
+        # обрізаємо, але зберігаємо кінець (часто там питання)
+        return text[-self.max_input_chars :]
+
+    def _build_messages(
+        self,
+        user_message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        extra_context: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        system = (
+            "Ти корисний асистент новинного застосунку. "
+            "Відповідай стисло та по суті. "
+            "Якщо бракує даних — став уточнювальне питання. "
+            "Не вигадуй факти."
         )
+        if extra_context:
+            system += f"\n\nКонтекст:\n{extra_context}"
 
-    raw = "\n\n".join(lines)
-    raw = _truncate(raw, LLM_MAX_INPUT_CHARS)
+        msgs: List[Dict[str, str]] = [{"role": "system", "content": system}]
 
-    prompt = f"""
-Ти — програмний агент моніторингу новин. Зроби короткий дайджест українською у форматі HTML для Telegram.
+        if history:
+            # history очікуємо як список: [{"role":"user"/"assistant","content":"..."}]
+            for m in history[-20:]:
+                r = (m.get("role") or "").strip()
+                c = (m.get("content") or "").strip()
+                if r in ("user", "assistant") and c:
+                    msgs.append({"role": r, "content": self._trim(c)})
 
-Вимоги:
-- 1 повідомлення, до {DIGEST_MAX_CHARS} символів.
-- 4–6 пунктів максимум.
-- Кожен пункт: 1 коротке речення по суті + короткий лінк
-- Лінк роби ТІЛЬКИ так: <a href="URL">Детальніше</a>
-- НІКОЛИ не показуй сам URL текстом (щоб не було великих посилань)
-- Не використовуй Markdown
-- Не вигадуй фактів
+        msgs.append({"role": "user", "content": self._trim(user_message)})
+        return msgs
 
-Ключові слова: {kw}
+    def ask(
+        self,
+        user_message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        extra_context: Optional[str] = None,
+    ) -> str:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
 
-Новини:
-{raw}
-""".strip()
-
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Поверни лише HTML-текст для Telegram, без пояснень."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
-        timeout=OPENAI_TIMEOUT_SEC,
-    )
-
-    text = (resp.choices[0].message.content or "").strip()
-    if not text:
-        raise RuntimeError("LLM повернув порожню відповідь")
-
-    return _truncate(text, DIGEST_MAX_CHARS)
-
-
-def chat_with_llm(history: List[Tuple[str, str]], user_text: str) -> str:
-    _ensure_key()
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Ти чат-асистент новинного бота. "
-                "Відповідай українською, коротко і по суті. "
-                "Якщо користувач питає про налаштування — пояснюй, що можна робити через кнопки."
-            ),
+        url = "https://api.openai.com/v1/chat/completions"
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": self._build_messages(user_message, history=history, extra_context=extra_context),
+            "temperature": 0.4,
         }
-    ]
 
-    for role, content in history:
-        r = "assistant" if role == "assistant" else "user"
-        messages.append({"role": r, "content": content})
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-    messages.append({"role": "user", "content": user_text})
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.timeout_sec)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text}")
 
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.5,
-        timeout=OPENAI_TIMEOUT_SEC,
-    )
-
-    text = (resp.choices[0].message.content or "").strip()
-    if not text:
-        raise RuntimeError("LLM повернув порожню відповідь")
-    return text
+        data = resp.json()
+        return (data["choices"][0]["message"]["content"] or "").strip()
