@@ -31,7 +31,7 @@ DIGEST_MAX_CHARS = int(os.getenv("DIGEST_MAX_CHARS", 3500))
 
 # --- LLM ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
 OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", 25))
 LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", 3500))
 USE_LLM = os.getenv("USE_LLM", "1") == "1"
