@@ -1,57 +1,71 @@
-import type { NewsItem } from "@/lib/types";
+// diploma-news-web/components/NewsCard.tsx
+import React from "react";
 
-function formatDate(iso?: string) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("uk-UA", { dateStyle: "medium", timeStyle: "short" });
-}
+type NewsItem = {
+  id: string;
+  title: string;
+  link: string;
+  source?: string;
+  summary?: string;
+  publishedAt?: string;
+  topic?: string;
+};
 
-function stripHtml(s?: string) {
-  if (!s) return "";
-  return s.replace(/<[^>]+>/g, "").trim();
+function cleanHtmlText(input?: string): string {
+  if (!input) return "";
+
+  // 1) прибираємо теги
+  let s = input.replace(/<[^>]*>/g, " ");
+
+  // 2) декодуємо найчастіші HTML-ентіті (без залежностей)
+  s = s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+
+  // 3) прибираємо зайві пробіли/переноси
+  s = s.replace(/\s+/g, " ").trim();
+
+  return s;
 }
 
 export default function NewsCard({ item }: { item: NewsItem }) {
-  const href = (item.link || "").trim();
+  const subtitle = cleanHtmlText(item.summary);
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div className="mb-3 text-sm text-slate-500">
-        <span>{item.source || ""}</span>
-        {item.publishedAt ? (
+      <h3 className="text-xl font-semibold leading-snug text-blue-700">
+        {item.title}
+      </h3>
+
+      <div className="mt-2 text-sm text-slate-500">
+        {item.topic ? <span>{item.topic}</span> : null}
+        {item.source ? (
           <>
-            <span className="mx-2">•</span>
-            <span>{formatDate(item.publishedAt)}</span>
+            {item.topic ? <span> · </span> : null}
+            <span>{item.source}</span>
           </>
         ) : null}
       </div>
 
-      <div className="text-xl font-semibold leading-snug text-blue-700">
-        {href ? (
-          <a href={href} target="_blank" rel="noreferrer">
-            {item.title}
-          </a>
-        ) : (
-          <span>{item.title}</span>
-        )}
-      </div>
-
-      {item.summary ? (
-        <p className="mt-3 text-slate-700">{stripHtml(item.summary)}</p>
+      {subtitle ? (
+        <p className="mt-4 text-base leading-relaxed text-slate-700">
+          {subtitle}
+        </p>
       ) : null}
 
-      {href ? (
-        <div className="mt-4">
-          <a
-            href={href}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-2 text-blue-700 hover:underline"
-          >
-            Перейти до джерела →
-          </a>
-        </div>
+      {item.link ? (
+        <a
+          className="mt-5 inline-flex items-center gap-2 text-blue-700 hover:underline"
+          href={item.link}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Перейти до джерела →
+        </a>
       ) : null}
     </div>
   );
