@@ -1,70 +1,76 @@
-import os
-import re
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-import feedparser
-import httpx
+import os
+import time
+from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+
+import requests
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 
-# ВАЖЛИВО: імпорт без відносних шляхів, щоб працювало на Render з uvicorn web_api.run_api:app
-import config
-from llm_agent import chat_with_agent
+# Підтримка запуску як package і як "root dir = DiplomaTgBot"
+try:
+    from ..config import TOPICS, RSS_URLS
+except Exception:
+    from config import TOPICS, RSS_URLS  # type: ignore
+
+try:
+    from llm_agent import chat_with_agent
+except Exception:
+    # якщо імпорт не вдався — не валимо сервіс, просто вимкнемо чат
+    chat_with_agent = None  # type: ignore
 
 
 app = FastAPI(title="Diploma News API", version="1.0.0")
 
-
-def _parse_origins(value: str) -> List[str]:
-    value = (value or "").strip()
-    if not value:
-        return []
-    # дозволяємо "a,b,c" або "a; b; c"
-    parts = re.split(r"[;,]\s*", value)
-    return [p.strip() for p in parts if p.strip()]
-
-
-CORS_ORIGINS = _parse_origins(os.getenv("CORS_ORIGINS", ""))
-
-# Якщо не задав — дозволимо все (так простіше на старті). Потім краще обмежити.
-if CORS_ORIGINS:
-    allow_origins = CORS_ORIGINS
-    allow_credentials = True
-else:
-    allow_origins = ["*"]
-    allow_credentials = False
+cors_origins = os.getenv("CORS_ORIGINS", "*").strip()
+allow_origins = [o.strip() for o in cors_origins.split(",")] if cors_origins else ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
-    allow_credentials=allow_credentials,
+    allow_origins=allow_origins if allow_origins != ["*"] else ["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_last_cache: Dict[str, Any] = {
+    "ts": 0.0,
+    "topic": "",
+    "limit": 0,
+    "items": [],
+}
 
 
 class NewsItem(BaseModel):
     title: str
     url: str
-    source: str = ""
+    source: str
     description: str = ""
+    published_at: str = ""
 
 
 class NewsResponse(BaseModel):
     items: List[NewsItem]
-    updated_at: str = ""
+    meta: Dict[str, Any]
 
 
 class ChatRequest(BaseModel):
     message: str
-    # опціонально фронт може передати поточні новини як контекст
-    context_items: Optional[List[Dict[str, Any]]] = None
+    context: Optional[List[Dict[str, Any]]] = None
 
 
 class ChatResponse(BaseModel):
     answer: str
+
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    # щоб головна сторінка не була пустою/Not Found
+    return {"service": "diploma-news", "status": "ok", "endpoints": ["/health", "/topics", "/news", "/chat"]}
 
 
 @app.get("/health")
@@ -74,100 +80,123 @@ def health() -> Dict[str, str]:
 
 @app.get("/topics")
 def topics() -> Dict[str, Any]:
-    # topics береться з config.TOPICS
-    return {"topics": config.TOPICS}
+    return {"topics": TOPICS}
 
 
-def _google_news_rss_url(query: str, lang: str = "uk", region: str = "UA") -> str:
-    from urllib.parse import quote
+def _extract_source_from_title(title: str) -> str:
+    # у Google News RSS часто "Заголовок — Джерело"
+    if " - " in title:
+        return title.split(" - ", 1)[-1].strip()
+    if " — " in title:
+        return title.split(" — ", 1)[-1].strip()
+    return ""
 
-    q = quote(query)
-    return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={region}&ceid={region}:{lang}"
 
+def _fetch_google_rss(url: str, timeout: int = 15) -> List[Dict[str, Any]]:
+    # Мінімальний парсер без важких залежностей
+    # В RSS Google News часто link = <link>...</link> у item
+    import xml.etree.ElementTree as ET
 
-def _clean_html(text: str) -> str:
-    if not text:
-        return ""
-    # грубо прибираємо теги, щоб не “їхала” верстка на фронті
-    text = re.sub(r"<[^>]+>", "", text)
-    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+
+    root = ET.fromstring(r.text)
+    channel = root.find("channel")
+    if channel is None:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = (item.findtext("description") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+
+        source = _extract_source_from_title(title)
+
+        out.append(
+            {
+                "title": title,
+                "url": link,  # головне: URL новини
+                "source": source,
+                "description": desc,
+                "published_at": pub,
+            }
+        )
+
+    return out
 
 
 @app.get("/news", response_model=NewsResponse)
-async def news(
+def news(
     topic: str = Query(default="all"),
     limit: int = Query(default=10, ge=1, le=50),
-) -> NewsResponse:
-    topic = (topic or "all").strip().lower()
+) -> Dict[str, Any]:
+    cache_ttl = int(os.getenv("NEWS_CACHE_TTL", "120"))  # секунд
+    now = time.time()
 
-    # topic=all -> беремо кілька тем, але обмежуємо загальний ліміт
+    # простий кеш, щоб Render не дохнув від частих запитів
+    if (
+        _last_cache["items"]
+        and _last_cache["topic"] == topic
+        and _last_cache["limit"] == limit
+        and now - float(_last_cache["ts"]) < cache_ttl
+    ):
+        return {
+            "items": _last_cache["items"],
+            "meta": {
+                "fetchedAt": _last_cache.get("fetchedAt", datetime.now(timezone.utc).isoformat()),
+                "topic": topic,
+                "total": len(_last_cache["items"]),
+                "cached": True,
+            },
+        }
+
+    urls: List[str] = []
     if topic == "all":
-        selected = config.TOPICS[:]
+        # всі RSS
+        for _, v in RSS_URLS.items():
+            urls.append(v)
     else:
-        found = config.get_topic_by_key(topic)
-        selected = [found] if found else []
+        if topic not in RSS_URLS:
+            return {
+                "items": [],
+                "meta": {"fetchedAt": datetime.now(timezone.utc).isoformat(), "topic": topic, "total": 0},
+            }
+        urls = [RSS_URLS[topic]]
 
-    if not selected:
-        return NewsResponse(items=[], updated_at="")
+    items: List[Dict[str, Any]] = []
+    for u in urls:
+        try:
+            items.extend(_fetch_google_rss(u))
+        except Exception:
+            continue
 
-    # збираємо RSS URL-и
-    urls = []
-    for t in selected:
-        urls.append(_google_news_rss_url(t["query"]))
+    # прибираємо порожні url, і ріжемо
+    items = [it for it in items if (it.get("url") or "").strip()]
+    items = items[:limit]
 
-    timeout = httpx.Timeout(config.REQUEST_TIMEOUT)
+    fetched_at = datetime.now(timezone.utc).isoformat()
 
-    items: List[NewsItem] = []
-    updated_at = ""
+    _last_cache.update(
+        {
+            "ts": now,
+            "topic": topic,
+            "limit": limit,
+            "items": items,
+            "fetchedAt": fetched_at,
+        }
+    )
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        for rss_url in urls:
-            try:
-                r = await client.get(rss_url)
-                r.raise_for_status()
-                feed = feedparser.parse(r.text)
-
-                if not updated_at:
-                    updated_at = getattr(feed.feed, "updated", "") or ""
-
-                for e in feed.entries:
-                    title = _clean_html(getattr(e, "title", "") or "")
-                    link = getattr(e, "link", "") or ""
-                    summary = _clean_html(getattr(e, "summary", "") or "")
-
-                    source = ""
-                    # інколи Google News дає source в e.source.title
-                    try:
-                        source = getattr(getattr(e, "source", None), "title", "") or ""
-                    except Exception:
-                        source = ""
-
-                    if title and link:
-                        items.append(
-                            NewsItem(
-                                title=title,
-                                url=link,
-                                source=source,
-                                description=summary,
-                            )
-                        )
-
-                    if len(items) >= limit:
-                        break
-
-                if len(items) >= limit:
-                    break
-
-            except Exception:
-                # не валимо весь /news, якщо одна тема впала
-                continue
-
-    return NewsResponse(items=items[:limit], updated_at=updated_at)
+    return {
+        "items": items,
+        "meta": {"fetchedAt": fetched_at, "topic": topic, "total": len(items), "cached": False},
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest) -> ChatResponse:
-    answer = await chat_with_agent(payload.message, payload.context_items)
-    return ChatResponse(answer=answer)
+def chat(payload: ChatRequest) -> Dict[str, Any]:
+    if chat_with_agent is None:
+        return {"answer": "AI-агент недоступний (помилка імпорту llm_agent)."}
+    answer = chat_with_agent(payload.message, payload.context)
+    return {"answer": answer}

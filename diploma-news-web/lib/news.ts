@@ -38,6 +38,7 @@ function matchesTopic(item: NewsItem, topic: Topic) {
   return topic.keywords.some((k) => hay.includes(normalizeText(k)));
 }
 
+
 function matchesQuery(item: NewsItem, q?: string) {
   const query = safeText(q);
   if (!query) return true;

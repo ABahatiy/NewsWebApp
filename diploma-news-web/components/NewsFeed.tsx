@@ -1,88 +1,157 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { NewsApiResponse, NewsItem, Topic } from "@/lib/types";
-import SearchBox from "@/components/SearchBox";
-import TopicFilter from "@/components/TopicFilter";
-import NewsCard from "@/components/NewsCard";
+import { useEffect, useMemo, useState } from "react";
+import ChatWidget from "./ChatWidget";
+
+type Topic = { id: string; title: string };
+
+type NewsItem = {
+  title: string;
+  url: string;
+  source: string;
+  description?: string;
+  published_at?: string;
+};
+
+type NewsApiResponse = {
+  items: NewsItem[];
+  meta?: { fetchedAt?: string; total?: number; topic?: string };
+};
 
 export default function NewsFeed() {
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [active, setActive] = useState<string>("all");
+  const [q, setQ] = useState("");
   const [items, setItems] = useState<NewsItem[]>([]);
-  const [topics, setTopics] = useState<Topic[]>([{ id: "all", title: "Усі", keywords: [] }]);
-  const [activeTopic, setActiveTopic] = useState<string>("all");
-  const [query, setQuery] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(true);
-  const [meta, setMeta] = useState<{ fetchedAt?: string; total?: number }>({});
+  const [fetchedAt, setFetchedAt] = useState<string>("");
 
-  const apiUrl = useMemo(() => {
-    const sp = new URLSearchParams();
-    if (query.trim()) sp.set("q", query.trim());
-    if (activeTopic && activeTopic !== "all") sp.set("topic", activeTopic);
-    sp.set("limit", "30");
-    return `/api/news?${sp.toString()}`;
-  }, [query, activeTopic]);
+  async function loadTopics() {
+    const res = await fetch("/api/topics");
+    const data = await res.json();
+    setTopics([{ id: "all", title: "Усі" }, ...(data?.topics || [])]);
+  }
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(apiUrl, { cache: "no-store" });
-      const data = (await res.json()) as NewsApiResponse;
-
-      setItems(data.items ?? []);
-      setTopics(data.topics ?? [{ id: "all", title: "Усі", keywords: [] }]);
-      setMeta({ fetchedAt: data.meta?.fetchedAt, total: data.meta?.total });
-    } catch {
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [apiUrl]);
+  async function loadNews(topic: string) {
+    const res = await fetch(`/api/news?topic=${encodeURIComponent(topic)}&limit=20`);
+    const data: NewsApiResponse = await res.json();
+    setItems(data?.items || []);
+    setFetchedAt(data?.meta?.fetchedAt || "");
+  }
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    loadTopics();
+    loadNews("all");
+  }, []);
+
+  useEffect(() => {
+    loadNews(active);
+  }, [active]);
+
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return items;
+    return items.filter((it) => {
+      const t = (it.title || "").toLowerCase();
+      const d = (it.description || "").toLowerCase();
+      const src = (it.source || "").toLowerCase();
+      return t.includes(s) || d.includes(s) || src.includes(s);
+    });
+  }, [items, q]);
 
   return (
-    <div className="flex flex-col gap-5">
-      <section className="card p-4">
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-2">
-            <h1 className="text-xl font-semibold">Стрічка новин</h1>
-            <p className="text-sm text-zinc-600">
-              Фільтруй по темах і пошуку. Дані беруться з RSS і віддаються через <code>/api/news</code>.
-            </p>
-          </div>
-
-          <SearchBox value={query} onChange={setQuery} />
-
-          <div className="flex flex-col gap-2">
-            <div className="text-sm font-medium text-zinc-800">Теми:</div>
-            <TopicFilter topics={topics} active={activeTopic} onChange={setActiveTopic} />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-600">
-            <span className="badge">Знайдено: {meta.total ?? 0}</span>
-            {meta.fetchedAt ? <span className="badge">Оновлено: {new Date(meta.fetchedAt).toLocaleString("uk-UA")}</span> : null}
-            <button className="btn" type="button" onClick={() => void load()}>
-              Оновити
-            </button>
-          </div>
+    <div className="mx-auto max-w-6xl px-4 py-6">
+      <div className="rounded-2xl border bg-white p-5">
+        <div className="text-2xl font-semibold">Стрічка новин</div>
+        <div className="mt-1 text-sm text-gray-600">
+          Дані беруться з бекенду (Render) через /api/news.
         </div>
-      </section>
 
-      {loading ? (
-        <div className="card p-6 text-sm text-zinc-600">Завантаження новин…</div>
-      ) : items.length === 0 ? (
-        <div className="card p-6 text-sm text-zinc-600">
-          Нічого не знайдено. Спробуй змінити тему або запит.
+        <div className="mt-4 flex gap-3">
+          <input
+            className="w-full rounded-xl border px-4 py-3 text-sm outline-none"
+            placeholder="Пошук по заголовку/опису..."
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <button
+            className="rounded-xl border px-4 py-3 text-sm"
+            onClick={() => setQ("")}
+          >
+            Очистити
+          </button>
         </div>
-      ) : (
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {items.map((it) => (
-            <NewsCard key={it.id} item={it} />
-          ))}
-        </section>
-      )}
+
+        <div className="mt-4 text-sm font-medium">Теми:</div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {topics.map((t) => {
+            const on = t.id === active;
+            return (
+              <button
+                key={t.id}
+                className={`rounded-full border px-3 py-1 text-sm ${
+                  on ? "bg-black text-white" : "bg-white"
+                }`}
+                onClick={() => setActive(t.id)}
+              >
+                {t.title}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-gray-700">
+          <div className="rounded-full border px-3 py-1">
+            Знайдено: {filtered.length}
+          </div>
+          <div className="rounded-full border px-3 py-1">
+            Оновлено: {fetchedAt ? new Date(fetchedAt).toLocaleString() : "-"}
+          </div>
+          <button
+            className="rounded-xl border px-4 py-2 text-sm"
+            onClick={() => loadNews(active)}
+          >
+            Оновити
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
+        {filtered.map((it, idx) => (
+          <div key={idx} className="rounded-2xl border bg-white p-5">
+            <a
+              className="text-xl font-semibold text-blue-700 hover:underline"
+              href={it.url}          // головне: реальний URL новини
+              target="_blank"
+              rel="noreferrer"
+            >
+              {it.title}
+            </a>
+
+            <div className="mt-2 text-sm text-gray-700">
+              {it.source ? it.source : ""}
+            </div>
+
+            {it.description ? (
+              <div className="mt-3 text-sm text-gray-700 line-clamp-4">
+                {it.description.replace(/<[^>]+>/g, "")}
+              </div>
+            ) : null}
+
+            <div className="mt-4">
+              <a
+                className="text-blue-700 hover:underline"
+                href={it.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Перейти до джерела →
+              </a>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <ChatWidget items={items} />
     </div>
   );
 }
