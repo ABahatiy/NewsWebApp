@@ -35,7 +35,7 @@ function toId(sourceId: string, item: RssItem) {
 function matchesTopic(item: NewsItem, topic: Topic) {
   if (!topic || topic.id === "all") return true;
   const hay = normalizeText([item.title, item.summary, item.source].filter(Boolean).join(" "));
-  return topic.keywords.some((k) => hay.includes(normalizeText(k)));
+  return (topic.keywords ?? []).some((k) => hay.includes(normalizeText(k)));
 }
 
 
