@@ -1,108 +1,112 @@
-import Parser from "rss-parser";
-import { DEFAULT_LIMIT, RSS_SOURCES, TOPICS } from "@/lib/config";
-import type { NewsItem, Topic } from "@/lib/types";
+// diploma-news-web/lib/news.ts
 
-type RssItem = {
-  title?: string;
-  link?: string;
-  pubDate?: string;
-  contentSnippet?: string;
-  content?: string;
-  guid?: string;
-  isoDate?: string;
+export type NewsItem = {
+  id: string;
+  title: string;
+  summary?: string | null;
+  link: string;
+  source?: string | null;
+  publishedAt?: string | null;
+  topic?: string | null;
 };
 
-const parser = new Parser();
+export type Topic = {
+  id: string;
+  title: string;
+  keywords?: string[];
+};
 
-function safeText(v?: string) {
-  return (v ?? "").trim();
+const STORAGE_KEY = "topicKeywordsOverrides:v2";
+
+export function normalizeText(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function normalizeText(v: string) {
-  return v.toLowerCase();
+export function cleanSummary(input?: string | null) {
+  if (!input) return "";
+  return input
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function pickSummary(item: RssItem) {
-  const s = item.contentSnippet || item.content || "";
-  return safeText(s).replace(/\s+/g, " ").slice(0, 220);
+export function parseKeywords(text: string): string[] {
+  return text
+    .split(/[,;\n]/g)
+    .map((s) => normalizeText(s))
+    .filter(Boolean);
 }
 
-function toId(sourceId: string, item: RssItem) {
-  const base = item.guid || item.link || item.title || `${Math.random()}`;
-  return `${sourceId}:${base}`.slice(0, 220);
+/**
+ * Overrides model:
+ * - added: що юзер додав
+ * - removed: що юзер прибрав/вимкнув із дефолтних
+ */
+export type TopicKeywordsOverride = {
+  added?: string[];
+  removed?: string[];
+};
+
+export function loadKeywordOverrides(): Record<string, TopicKeywordsOverride> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, TopicKeywordsOverride>;
+  } catch {
+    return {};
+  }
 }
 
-function matchesTopic(item: NewsItem, topic: Topic) {
+export function saveKeywordOverrides(map: Record<string, TopicKeywordsOverride>) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+}
+
+export function getEffectiveKeywords(topic: Topic, ov?: TopicKeywordsOverride): string[] {
+  const base = (topic.keywords ?? []).map(normalizeText).filter(Boolean);
+  const added = (ov?.added ?? []).map(normalizeText).filter(Boolean);
+  const removed = new Set((ov?.removed ?? []).map(normalizeText).filter(Boolean));
+
+  // base - removed
+  const filteredBase = base.filter((k) => !removed.has(k));
+
+  // + added (без дублікатів)
+  const set = new Set<string>(filteredBase);
+  for (const k of added) set.add(k);
+
+  return Array.from(set);
+}
+
+export function applyKeywordOverrides(
+  topics: Topic[],
+  overrides: Record<string, TopicKeywordsOverride>
+): Topic[] {
+  return topics.map((t) => ({
+    ...t,
+    keywords: getEffectiveKeywords(t, overrides[t.id]),
+  }));
+}
+
+export function matchesTopic(item: NewsItem, topic?: Topic | null) {
   if (!topic || topic.id === "all") return true;
-  const hay = normalizeText([item.title, item.summary, item.source].filter(Boolean).join(" "));
+
   const keywords = topic.keywords ?? [];
-  if (!keywords.length) return false;
-  return keywords.some((k) => hay.includes(normalizeText(k)));
-}
+  if (!keywords.length) return true;
 
-
-function matchesQuery(item: NewsItem, q?: string) {
-  const query = safeText(q);
-  if (!query) return true;
-  const hay = normalizeText([item.title, item.summary, item.source].filter(Boolean).join(" "));
-  return hay.includes(normalizeText(query));
-}
-
-export async function fetchNews(params: {
-  q?: string;
-  topic?: string;
-  limit?: number;
-}): Promise<{ items: NewsItem[]; topics: Topic[] }> {
-  const topicId = safeText(params.topic) || "all";
-  const topicObj = TOPICS.find((t) => t.id === topicId) ?? TOPICS[0];
-  const limit = Math.max(1, Math.min(params.limit ?? DEFAULT_LIMIT, 100));
-
-  const feeds = await Promise.all(
-    RSS_SOURCES.map(async (src) => {
-      try {
-        const feed = await parser.parseURL(src.url);
-        const items = (feed.items ?? []) as RssItem[];
-
-        const mapped: NewsItem[] = items
-          .map((it) => {
-            const title = safeText(it.title);
-            const link = safeText(it.link);
-            if (!title || !link) return null;
-
-            return {
-              id: toId(src.id, it),
-              title,
-              link,
-              source: src.title,
-              publishedAt: it.isoDate || it.pubDate,
-              summary: pickSummary(it)
-            } satisfies NewsItem;
-          })
-          .filter(Boolean) as NewsItem[];
-
-        return mapped;
-      } catch {
-        return [];
-      }
-    })
+  const hay = normalizeText(
+    [item.title, item.summary, item.source].filter(Boolean).join(" ")
   );
 
-  const all = feeds.flat();
-
-  // Фільтри
-  const filtered = all
-    .filter((it) => matchesTopic(it, topicObj))
-    .filter((it) => matchesQuery(it, params.q));
-
-  // Сортування за датою (якщо є), інакше — як є
-  filtered.sort((a, b) => {
-    const da = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
-    const db = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
-    return db - da;
-  });
-
-  return {
-    items: filtered.slice(0, limit),
-    topics: TOPICS
-  };
+  return keywords.some((k) => hay.includes(normalizeText(k)));
 }
