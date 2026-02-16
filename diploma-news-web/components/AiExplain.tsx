@@ -1,92 +1,147 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
-type Props = {
-  // можна передати новини як контекст, але це опційно
-  contextItems?: Array<{
-    title?: string;
-    url?: string;
-    source?: string;
-    description?: string;
-  }>;
+type ChatRole = "user" | "assistant";
+
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  content: string;
 };
 
-export default function AiExplain({ contextItems = [] }: Props) {
-  const [message, setMessage] = useState("");
-  const [answer, setAnswer] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>("");
+function stripHtmlEntities(s: string) {
+  // прибирає типові &nbsp; та інші, щоб не засмічувало текст
+  return s
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+}
 
-  const onSend = async () => {
-    const text = message.trim();
+export default function AIExplain() {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  const canSend = useMemo(() => input.trim().length > 0, [input]);
+
+  const handleClear = () => {
+    setInput("");
+    setMessages([]);
+  };
+
+  const handleSend = async () => {
+    const text = input.trim();
     if (!text) return;
 
-    setLoading(true);
-    setError("");
-    setAnswer("");
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
 
     try {
-      const res = await fetch("/api/chat", {
+      // якщо у тебе інший ендпоінт — заміни тут
+      const res = await fetch("/api/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          context_items: contextItems,
-        }),
+        body: JSON.stringify({ text }),
       });
 
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(t || `HTTP ${res.status}`);
-      }
-
       const data = await res.json();
-      setAnswer(data.answer || "");
-    } catch (e: any) {
-      setError(e?.message || "Помилка запиту");
-    } finally {
-      setLoading(false);
+
+      const answerRaw =
+        typeof data?.answer === "string"
+          ? data.answer
+          : typeof data?.text === "string"
+          ? data.text
+          : typeof data?.message === "string"
+          ? data.message
+          : JSON.stringify(data);
+
+      const assistantMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: stripHtmlEntities(answerRaw),
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
+    } catch (e) {
+      const assistantMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "Помилка: не вдалося отримати відповідь від AI.",
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
     }
   };
 
   return (
-    <div className="mt-6 rounded-2xl border bg-white p-4">
-      <div className="text-lg font-semibold">AI пояснення</div>
-      <div className="mt-1 text-sm text-gray-600">
-        Попроси коротко пояснити новину, зробити підсумок або відповісти на питання.
-      </div>
-
-      <div className="mt-3 flex gap-2">
-        <input
-          className="w-full rounded-xl border px-3 py-2"
-          placeholder="Наприклад: Поясни коротко, про що ці новини"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onSend();
-          }}
-        />
-        <button
-          className="rounded-xl border px-4 py-2"
-          onClick={onSend}
-          disabled={loading}
-        >
-          {loading ? "..." : "Надіслати"}
-        </button>
-      </div>
-
-      {error ? (
-        <div className="mt-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm">
-          {error}
+    <section className="w-full">
+      {/* ВАЖЛИВО: min-w-0 + max-w-full, щоб нічого не розпирало */}
+      <div className="w-full max-w-full min-w-0 rounded-2xl border bg-white p-4 sm:p-6">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-xl font-semibold leading-tight">AI Explain</h2>
+            <p className="text-sm text-gray-500">
+              Встав заголовок/текст новини — я коротко поясню.
+            </p>
+          </div>
         </div>
-      ) : null}
 
-      {answer ? (
-        <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-sm whitespace-pre-wrap">
-          {answer}
+        {/* INPUT */}
+        <div className="flex flex-col gap-3">
+          <textarea
+            className="w-full max-w-full min-w-0 resize-y rounded-xl border px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-200"
+            rows={3}
+            placeholder="Встав текст новини або заголовок..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+          />
+
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!canSend}
+              className="rounded-xl border px-5 py-2 text-base disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Відправити
+            </button>
+
+            <button
+              type="button"
+              onClick={handleClear}
+              className="rounded-xl border px-5 py-2 text-base"
+            >
+              Очистити
+            </button>
+          </div>
         </div>
-      ) : null}
-    </div>
+
+        {/* MESSAGES */}
+        <div className="mt-5 space-y-3">
+          {messages.map((m) => (
+            <div
+              key={m.id}
+              className={[
+                "w-full max-w-full min-w-0 rounded-2xl border p-4",
+                m.role === "user" ? "bg-gray-50" : "bg-white",
+              ].join(" ")}
+            >
+              {/* Найважливіше для “не вилазить”: break-words + whitespace-pre-wrap + overflow-hidden */}
+              <div className="min-w-0 max-w-full overflow-hidden text-base leading-relaxed whitespace-pre-wrap break-words">
+                {m.content}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
