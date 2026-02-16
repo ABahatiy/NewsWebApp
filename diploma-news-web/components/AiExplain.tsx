@@ -1,130 +1,111 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useEffect, useRef } from "react";
+
+type Message = { role: "user" | "assistant"; content: string };
 
 type Props = {
-  // опціонально: якщо ти передаєш тему/текст новини — залишиться сумісним
-  initialText?: string;
+  messages: Message[];
+  input: string;
+  onInputChange: (v: string) => void;
+  onSend: () => void;
+  onClear: () => void;
+  isLoading?: boolean;
 };
 
-export default function AIExplain({ initialText = "" }: Props) {
-  const [input, setInput] = useState(initialText);
-  const [answer, setAnswer] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>("");
+export default function AiExplain({
+  messages,
+  input,
+  onInputChange,
+  onSend,
+  onClear,
+  isLoading,
+}: Props) {
+  const listRef = useRef<HTMLDivElement | null>(null);
 
-  const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
-
-  async function handleSend() {
-    if (!canSend) return;
-
-    setLoading(true);
-    setError("");
-
-    try {
-      // підлаштуй URL під свій реальний endpoint (у тебе вже є /api/ai або схожий)
-      const res = await fetch("/api/ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: input }),
-      });
-
-      if (!res.ok) {
-        const msg = await res.text().catch(() => "");
-        throw new Error(msg || `Request failed: ${res.status}`);
-      }
-
-      const data = (await res.json()) as { answer?: string; text?: string; result?: string };
-      const next =
-        data.answer ??
-        data.text ??
-        data.result ??
-        "";
-
-      setAnswer(next || "Порожня відповідь від сервера.");
-    } catch (e: any) {
-      setError(e?.message || "Помилка запиту");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function handleClear() {
-    setInput("");
-    setAnswer("");
-    setError("");
-  }
+  // авто-скрол вниз після відповіді
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, isLoading]);
 
   return (
     <section className="w-full">
-      {/* Контейнер з фіксованою висотою. min-h-0 критично для скролу в flex */}
-      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex h-[72vh] flex-col min-h-0">
-          {/* Header */}
-          <div className="border-b border-slate-200 px-6 py-4">
-            <h2 className="text-lg font-semibold text-slate-900">AI пояснення</h2>
-            <p className="text-sm text-slate-500">
-              Встав текст або посилання на новину — отримаєш коротке пояснення.
-            </p>
+      {/* ВАЖЛИВО: min-h-0 щоб overflow працював у flex */}
+      <div className="rounded-2xl border bg-white shadow-sm flex flex-col min-h-0 h-[70svh] md:h-[65vh]">
+        {/* header */}
+        <div className="px-4 py-3 border-b">
+          <div className="font-semibold">ШІ пояснення</div>
+          <div className="text-sm text-gray-500">
+            Встав посилання або текст новини — отримаєш коротке пояснення.
           </div>
+        </div>
 
-          {/* Body (скролиться тільки відповідь) */}
-          <div className="flex flex-1 flex-col gap-4 px-6 py-4 min-h-0">
-            {/* Input */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Встав текст/посилання на новину…"
-                className="w-full resize-y bg-transparent text-slate-900 outline-none"
-                rows={3}
-              />
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={!canSend}
-                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {loading ? "Відправляю…" : "Відправити"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
-                >
-                  Очистити
-                </button>
-              </div>
-
-              {error ? (
-                <p className="mt-3 text-sm text-red-600">{error}</p>
-              ) : null}
+        {/* messages area (СКРОЛ ТУТ) */}
+        <div
+          ref={listRef}
+          className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3"
+        >
+          {messages.length === 0 ? (
+            <div className="text-sm text-gray-500">
+              Напиши запит нижче, щоб почати діалог.
             </div>
-
-            {/* Answer box: фіксована висота + overflow */}
-            <div className="flex flex-1 flex-col min-h-0">
-              <div className="mb-2 text-sm font-medium text-slate-700">Відповідь</div>
-
-              <div className="flex-1 min-h-0 rounded-xl border border-slate-200 bg-white p-4 overflow-y-auto overflow-x-hidden">
-                {answer ? (
-                  <div className="ai-message whitespace-pre-wrap break-words text-slate-900">
-                    {answer}
+          ) : (
+            messages.map((m, idx) => (
+              <div
+                key={idx}
+                className={`max-w-[900px] ${
+                  m.role === "user" ? "ml-auto" : "mr-auto"
+                }`}
+              >
+                <div
+                  className={`rounded-2xl px-4 py-3 border ${
+                    m.role === "user"
+                      ? "bg-gray-900 text-white border-gray-900"
+                      : "bg-gray-50 text-gray-900 border-gray-200"
+                  }`}
+                >
+                  {/* ВАЖЛИВО: перенос рядків + щоб не розширювало блок */}
+                  <div className="whitespace-pre-wrap break-words leading-relaxed">
+                    {m.content}
                   </div>
-                ) : (
-                  <div className="text-sm text-slate-500">
-                    Тут з’явиться відповідь після запиту.
-                  </div>
-                )}
+                </div>
               </div>
-            </div>
-          </div>
+            ))
+          )}
 
-          {/* Footer */}
-          <div className="border-t border-slate-200 px-6 py-3 text-xs text-slate-500">
-            Якщо відповідь довга — прокручуй блок “Відповідь”, сторінка не буде роздуватися.
+          {isLoading ? (
+            <div className="text-sm text-gray-500">Генерую відповідь…</div>
+          ) : null}
+        </div>
+
+        {/* input area */}
+        <div className="border-t p-4">
+          <textarea
+            value={input}
+            onChange={(e) => onInputChange(e.target.value)}
+            rows={3}
+            className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2 focus:ring-gray-200 resize-none"
+            placeholder="Встав текст/посилання та натисни «Відправити»"
+          />
+
+          <div className="mt-3 flex gap-3">
+            <button
+              onClick={onSend}
+              disabled={!input.trim() || isLoading}
+              className="rounded-xl border px-4 py-2 bg-gray-900 text-white disabled:opacity-50"
+            >
+              Відправити
+            </button>
+
+            <button
+              onClick={onClear}
+              className="rounded-xl border px-4 py-2"
+              type="button"
+            >
+              Очистити
+            </button>
           </div>
         </div>
       </div>
