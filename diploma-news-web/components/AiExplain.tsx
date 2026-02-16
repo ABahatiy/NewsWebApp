@@ -125,22 +125,33 @@ export default function AIExplain() {
         </div>
 
         {/* MESSAGES */}
-        <div className="mt-5 space-y-3">
+        <div
+          className="
+            mt-5
+            w-full max-w-full min-w-0
+            rounded-2xl border bg-gray-50
+            p-3
+            h-[420px] sm:h-[520px]
+            overflow-y-auto
+            overscroll-contain
+            space-y-3
+          "
+        >
           {messages.map((m) => (
             <div
               key={m.id}
               className={[
-                "w-full max-w-full min-w-0 rounded-2xl border p-4",
-                m.role === "user" ? "bg-gray-50" : "bg-white",
+                "w-full max-w-full min-w-0 rounded-2xl border p-4 bg-white",
+                m.role === "user" ? "border-gray-200" : "border-gray-200",
               ].join(" ")}
             >
-              {/* Найважливіше для “не вилазить”: break-words + whitespace-pre-wrap + overflow-hidden */}
               <div className="min-w-0 max-w-full overflow-hidden text-base leading-relaxed whitespace-pre-wrap break-words">
                 {m.content}
               </div>
             </div>
           ))}
         </div>
+
       </div>
     </section>
   );
