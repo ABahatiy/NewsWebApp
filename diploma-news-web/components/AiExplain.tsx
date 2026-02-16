@@ -1,178 +1,130 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
-type Role = "user" | "assistant";
-
-type ChatMessage = {
-  id: string;
-  role: Role;
-  content: string;
+type Props = {
+  // опціонально: якщо ти передаєш тему/текст новини — залишиться сумісним
+  initialText?: string;
 };
 
-function uid() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-export default function AIExplain() {
-  const [input, setInput] = useState("");
+export default function AIExplain({ initialText = "" }: Props) {
+  const [input, setInput] = useState(initialText);
+  const [answer, setAnswer] = useState<string>("");
   const [loading, setLoading] = useState(false);
-
-  const [messages, setMessages] = useState<ChatMessage[]>(() => [
-    {
-      id: uid(),
-      role: "assistant",
-      content: "Встав посилання або текст новини — я поясню зміст коротко і структуровано.",
-    },
-  ]);
-
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const [error, setError] = useState<string>("");
 
   const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length]);
+  async function handleSend() {
+    if (!canSend) return;
 
-  const clearChat = () => {
-    setMessages([
-      {
-        id: uid(),
-        role: "assistant",
-        content: "Встав посилання або текст новини — я поясню зміст коротко і структуровано.",
-      },
-    ]);
-    setInput("");
-  };
-
-  const send = async () => {
-    const text = input.trim();
-    if (!text || loading) return;
-
-    setMessages((prev) => [...prev, { id: uid(), role: "user", content: text }]);
-    setInput("");
     setLoading(true);
+    setError("");
 
     try {
-      // Підстав свій endpoint, якщо він інший
+      // підлаштуй URL під свій реальний endpoint (у тебе вже є /api/ai або схожий)
       const res = await fetch("/api/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ text: input }),
       });
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new Error(errText || `HTTP ${res.status}`);
+        const msg = await res.text().catch(() => "");
+        throw new Error(msg || `Request failed: ${res.status}`);
       }
 
-      const data = await res.json().catch(() => ({}));
-      const answer =
-        data?.answer || data?.message || data?.text || "Не вдалося отримати відповідь від сервера.";
+      const data = (await res.json()) as { answer?: string; text?: string; result?: string };
+      const next =
+        data.answer ??
+        data.text ??
+        data.result ??
+        "";
 
-      setMessages((prev) => [...prev, { id: uid(), role: "assistant", content: String(answer) }]);
+      setAnswer(next || "Порожня відповідь від сервера.");
     } catch (e: any) {
-      setMessages((prev) => [
-        ...prev,
-        { id: uid(), role: "assistant", content: `Помилка: ${e?.message || "невідома"}` },
-      ]);
+      setError(e?.message || "Помилка запиту");
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  function handleClear() {
+    setInput("");
+    setAnswer("");
+    setError("");
+  }
 
   return (
-    <section className="w-full max-w-3xl mx-auto px-4 sm:px-6 overflow-x-hidden">
-      <div className="w-full min-w-0 max-w-full rounded-2xl border bg-white shadow-sm overflow-hidden">
-        <div className="p-4 sm:p-5 border-b">
-          <h2 className="text-xl sm:text-2xl font-semibold">AI пояснення</h2>
-          <p className="text-sm text-gray-600 mt-1">
-            Надішли посилання або текст — отримаєш структурований виклад.
-          </p>
-        </div>
-
-        {/* Важливо: фіксована висота + flex + min-h-0 */}
-        <div className="flex flex-col h-[72vh] min-w-0 max-w-full">
-          {/* Окрема прокручувана область */}
-          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-gray-50 p-3 sm:p-4">
-            <div className="space-y-3 w-full min-w-0 max-w-full">
-              {messages.map((m) => {
-                const isUser = m.role === "user";
-                return (
-                  <div
-                    key={m.id}
-                    className={`w-full min-w-0 max-w-full flex ${isUser ? "justify-end" : "justify-start"}`}
-                  >
-                    <div
-                      className={[
-                        "min-w-0",
-                        "max-w-[92%] sm:max-w-[85%]",
-                        "rounded-2xl border px-4 py-3 bg-white",
-                        "overflow-hidden", // не даємо розширюватися
-                        isUser ? "border-blue-200" : "border-gray-200",
-                      ].join(" ")}
-                    >
-                      <div
-                        className={[
-                          "text-sm sm:text-base leading-relaxed",
-                          "whitespace-pre-wrap",
-                          "break-words",
-                          "overflow-x-hidden",
-                          "[overflow-wrap:anywhere]",
-                          "[word-break:break-word]",
-
-                          // ОЦЕ ГОЛОВНЕ:
-                          "max-h-[45vh] overflow-y-auto pr-1", // фікс висота + скрол
-                        ].join(" ")}
-                      >
-                        {m.content}
-                      </div>
-
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={bottomRef} />
-            </div>
+    <section className="w-full">
+      {/* Контейнер з фіксованою висотою. min-h-0 критично для скролу в flex */}
+      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex h-[72vh] flex-col min-h-0">
+          {/* Header */}
+          <div className="border-b border-slate-200 px-6 py-4">
+            <h2 className="text-lg font-semibold text-slate-900">AI пояснення</h2>
+            <p className="text-sm text-slate-500">
+              Встав текст або посилання на новину — отримаєш коротке пояснення.
+            </p>
           </div>
 
-          <div className="border-t bg-white p-3 sm:p-4">
-            <div className="flex gap-3 items-end min-w-0">
+          {/* Body (скролиться тільки відповідь) */}
+          <div className="flex flex-1 flex-col gap-4 px-6 py-4 min-h-0">
+            {/* Input */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <textarea
-                className="flex-1 min-w-0 max-w-full rounded-xl border px-3 py-2 text-sm sm:text-base resize-none outline-none focus:ring-2 focus:ring-blue-200"
-                rows={3}
-                placeholder="Встав посилання або текст..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
+                placeholder="Встав текст/посилання на новину…"
+                className="w-full resize-y bg-transparent text-slate-900 outline-none"
+                rows={3}
               />
 
-              <div className="flex gap-2 shrink-0">
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className="rounded-xl border px-4 py-2 text-sm sm:text-base hover:bg-gray-50"
-                  onClick={clearChat}
-                  disabled={loading}
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loading ? "Відправляю…" : "Відправити"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleClear}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
                 >
                   Очистити
                 </button>
-                <button
-                  type="button"
-                  className="rounded-xl bg-blue-600 text-white px-4 py-2 text-sm sm:text-base hover:bg-blue-700 disabled:opacity-60"
-                  onClick={send}
-                  disabled={!canSend}
-                >
-                  {loading ? "..." : "Відправити"}
-                </button>
               </div>
+
+              {error ? (
+                <p className="mt-3 text-sm text-red-600">{error}</p>
+              ) : null}
             </div>
 
-            <p className="text-xs text-gray-500 mt-2">Enter — відправити, Shift+Enter — новий рядок.</p>
+            {/* Answer box: фіксована висота + overflow */}
+            <div className="flex flex-1 flex-col min-h-0">
+              <div className="mb-2 text-sm font-medium text-slate-700">Відповідь</div>
+
+              <div className="flex-1 min-h-0 rounded-xl border border-slate-200 bg-white p-4 overflow-y-auto overflow-x-hidden">
+                {answer ? (
+                  <div className="ai-message whitespace-pre-wrap break-words text-slate-900">
+                    {answer}
+                  </div>
+                ) : (
+                  <div className="text-sm text-slate-500">
+                    Тут з’явиться відповідь після запиту.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="border-t border-slate-200 px-6 py-3 text-xs text-slate-500">
+            Якщо відповідь довга — прокручуй блок “Відповідь”, сторінка не буде роздуватися.
           </div>
         </div>
       </div>

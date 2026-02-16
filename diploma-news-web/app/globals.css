@@ -42,3 +42,8 @@ a {
 .badge-active {
   @apply border-zinc-900 bg-zinc-900 text-white;
 }
+
+.ai-message {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
