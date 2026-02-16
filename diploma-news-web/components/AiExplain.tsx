@@ -118,13 +118,16 @@ export default function AIExplain() {
                           "whitespace-pre-wrap",
                           "break-words",
                           "overflow-x-hidden",
-                          // ключове: ламає навіть дуже довгі шматки тексту/посилання
                           "[overflow-wrap:anywhere]",
                           "[word-break:break-word]",
+
+                          // ОЦЕ ГОЛОВНЕ:
+                          "max-h-[45vh] overflow-y-auto pr-1", // фікс висота + скрол
                         ].join(" ")}
                       >
                         {m.content}
                       </div>
+
                     </div>
                   </div>
                 );
